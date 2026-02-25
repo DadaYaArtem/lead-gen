@@ -199,7 +199,8 @@ def main():
         failed_tests = [r for r in tester.test_results if not r['success']]
         print(f"❌ {len(failed_tests)} test(s) failed:")
         for test in failed_tests:
-            print(f"   - {test['test']}: {test.get('error', f'Status {test.get(\"actual_status\")} != {test.get(\"expected_status\")}')}")
+            error_msg = test.get('error', f"Status {test.get('actual_status')} != {test.get('expected_status')}")
+            print(f"   - {test['test']}: {error_msg}")
         return 1
 
 if __name__ == "__main__":
