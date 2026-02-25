@@ -1,52 +1,90 @@
-import { useEffect } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import "@/App.css";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
 import axios from "axios";
+import { toast } from "sonner";
+import { Dashboard } from "@/components/Dashboard";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
 
-const Home = () => {
-  const helloWorldApi = async () => {
-    try {
-      const response = await axios.get(`${API}/`);
-      console.log(response.data.message);
-    } catch (e) {
-      console.error(e, `errored out requesting / api`);
-    }
-  };
+function App() {
+  const [jobId, setJobId] = useState(null);
+  const [status, setStatus] = useState(null);
+  const [results, setResults] = useState(null);
+  const [isRunning, setIsRunning] = useState(false);
+  const [error, setError] = useState(null);
+  const pollingRef = useRef(null);
 
-  useEffect(() => {
-    helloWorldApi();
+  const stopPolling = useCallback(() => {
+    if (pollingRef.current) {
+      clearInterval(pollingRef.current);
+      pollingRef.current = null;
+    }
   }, []);
 
-  return (
-    <div>
-      <header className="App-header">
-        <a
-          className="App-link"
-          href="https://emergent.sh"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <img src="https://avatars.githubusercontent.com/in/1201222?s=120&u=2686cf91179bbafbc7a71bfbc43004cf9ae1acea&v=4" />
-        </a>
-        <p className="mt-5">Building something incredible ~!</p>
-      </header>
-    </div>
-  );
-};
+  const fetchResults = useCallback(async (jid) => {
+    try {
+      const response = await axios.get(`${API}/results/${jid}`);
+      setResults(response.data);
+    } catch (e) {
+      console.error("Failed to fetch results:", e);
+    }
+  }, []);
 
-function App() {
+  const pollStatus = useCallback((jid) => {
+    const poll = async () => {
+      try {
+        const response = await axios.get(`${API}/status/${jid}`);
+        setStatus(response.data);
+
+        if (response.data.completed) {
+          stopPolling();
+          setIsRunning(false);
+          await fetchResults(jid);
+        }
+      } catch (e) {
+        console.error("Polling error:", e);
+      }
+    };
+
+    poll();
+    pollingRef.current = setInterval(poll, 3000);
+  }, [stopPolling, fetchResults]);
+
+  const runAnalysis = useCallback(async () => {
+    setIsRunning(true);
+    setError(null);
+    setStatus(null);
+    setResults(null);
+    setJobId(null);
+
+    try {
+      const response = await axios.post(`${API}/run-analysis`);
+      const jid = response.data.job_id;
+      setJobId(jid);
+      toast.success("Analysis started");
+      pollStatus(jid);
+    } catch (e) {
+      const msg = e.response?.data?.detail || e.message || "Failed to start analysis";
+      setError(msg);
+      setIsRunning(false);
+      toast.error(msg);
+    }
+  }, [pollStatus]);
+
+  useEffect(() => {
+    return () => stopPolling();
+  }, [stopPolling]);
+
   return (
-    <div className="App">
-      <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<Home />}>
-            <Route index element={<Home />} />
-          </Route>
-        </Routes>
-      </BrowserRouter>
+    <div className="min-h-screen bg-[#f8fafc]">
+      <Dashboard
+        isRunning={isRunning}
+        status={status}
+        results={results}
+        error={error}
+        onRunAnalysis={runAnalysis}
+      />
     </div>
   );
 }
