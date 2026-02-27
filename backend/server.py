@@ -11,13 +11,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, List
 from pydantic import BaseModel
+from json_repair import repair_json
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 HEYREACH_API_KEY = os.environ.get('HEYREACH_API_KEY')
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
-LINKEDIN_ACCOUNT_ID = os.environ.get('LINKEDIN_ACCOUNT_ID')
 
 _accounts_raw = os.environ.get('LINKEDIN_ACCOUNTS', '[]')
 LINKEDIN_ACCOUNTS = json.loads(_accounts_raw)
@@ -69,13 +69,19 @@ def extract_openai_text(data: dict) -> str:
 
 
 def parse_json_from_text(text: str) -> dict:
-    """Parse JSON from OpenAI response text, handling markdown wrappers"""
+    """Parse JSON from OpenAI response text, handling markdown wrappers and malformed JSON"""
     text = text.replace('```json', '').replace('```', '').strip()
     json_start = text.find('{')
     json_end = text.rfind('}') + 1
     if json_start != -1 and json_end > json_start:
         text = text[json_start:json_end]
-    return json.loads(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        repaired = repair_json(text, return_objects=True)
+        if isinstance(repaired, dict):
+            return repaired
+        raise ValueError(f"Could not parse JSON even after repair")
 
 
 async def call_openai(prompt: str, use_web_search: bool = False, timeout_sec: int = 180) -> dict:
