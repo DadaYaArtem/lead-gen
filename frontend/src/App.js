@@ -15,14 +15,79 @@ function App() {
   const [error, setError] = useState(null);
   const [accounts, setAccounts] = useState([]);
   const [selectedAccountId, setSelectedAccountId] = useState(null);
+  const [leadsFromDb, setLeadsFromDb] = useState([]);
+  const [queueStats, setQueueStats] = useState(null);
   const pollingRef = useRef(null);
 
+  // Fetch accounts on mount
   useEffect(() => {
     axios.get(`${API}/accounts`).then((res) => {
       const list = res.data.accounts || [];
       setAccounts(list);
       if (list.length === 1) setSelectedAccountId(list[0].id);
     }).catch((e) => console.error("Failed to fetch accounts:", e));
+  }, []);
+
+  // Fetch leads from DB when account changes
+  useEffect(() => {
+    if (!selectedAccountId) return;
+    
+    const fetchLeads = async () => {
+      try {
+        const res = await axios.get(`${API}/leads/${selectedAccountId}`);
+        const leads = res.data.leads || [];
+        setLeadsFromDb(leads);
+        
+        // Transform DB leads to results format
+        const transformed = leads.map(lead => ({
+          name: lead.full_name || lead.name || "Unknown",
+          company: lead.company_name || lead.company || "",
+          position: lead.position || "",
+          location: lead.location || "",
+          profileUrl: lead.profile_url || "",
+          headline: lead.headline || "",
+          intent: lead.intent || "",
+          intent_confidence: lead.confidence || "",
+          status: lead.messages ? "done" : "pending",
+          fit_score: lead.analysis?.qualification?.fit_score || 0,
+          qualification_status: lead.analysis?.qualification?.status || "",
+          executive_summary: lead.executive_summary || "",
+          analysis: lead.analysis || {},
+          messages: lead.messages?.messages || [],
+          recommended_top_3: lead.messages?.recommended_top_3 || [],
+          strategy_notes: lead.messages?.notes || "",
+        }));
+        
+        if (transformed.length > 0) {
+          setResults({
+            job_id: null,
+            completed: true,
+            total_leads: transformed.length,
+            results: transformed,
+          });
+        }
+      } catch (e) {
+        console.error("Failed to fetch leads from DB:", e);
+      }
+    };
+    
+    fetchLeads();
+  }, [selectedAccountId]);
+
+  // Fetch queue stats periodically
+  useEffect(() => {
+    const fetchStats = async () => {
+      try {
+        const res = await axios.get(`${API}/queue/stats`);
+        setQueueStats(res.data.stats);
+      } catch (e) {
+        console.error("Failed to fetch queue stats:", e);
+      }
+    };
+    
+    fetchStats();
+    const interval = setInterval(fetchStats, 5000);
+    return () => clearInterval(interval);
   }, []);
 
   const stopPolling = useCallback(() => {
@@ -111,6 +176,8 @@ function App() {
         isRunning={isRunning}
         status={status}
         results={results}
+        leadsFromDb={leadsFromDb}
+        queueStats={queueStats}
         error={error}
         onRunAnalysis={runAnalysis}
         onRetryLeads={retryLeads}

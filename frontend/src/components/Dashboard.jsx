@@ -20,9 +20,24 @@ import {
   XCircle,
   BarChart3,
   RefreshCw,
+  Inbox,
+  Clock,
 } from "lucide-react";
 
-export function Dashboard({ isRunning, status, results, error, onRunAnalysis, onRetryLeads, jobId, accounts, selectedAccountId, onAccountChange }) {
+export function Dashboard({ 
+  isRunning, 
+  status, 
+  results, 
+  leadsFromDb, 
+  queueStats,
+  error, 
+  onRunAnalysis, 
+  onRetryLeads, 
+  jobId, 
+  accounts, 
+  selectedAccountId, 
+  onAccountChange 
+}) {
   const [selectedLeads, setSelectedLeads] = useState(new Set());
 
   const toggleSelect = (name) => {
@@ -39,14 +54,20 @@ export function Dashboard({ isRunning, status, results, error, onRunAnalysis, on
     setSelectedLeads(new Set());
     onRetryLeads(names);
   };
+  
+  // Use DB results if available, otherwise use job results
+  const displayResults = results?.results?.length > 0 ? results : null;
   const totalLeads = status?.total_leads || 0;
   const processed = status?.processed || 0;
   const progressPercent = totalLeads > 0 ? Math.round((processed / totalLeads) * 100) : 0;
   const isComplete = status?.completed;
-  const hasResults = results?.results?.length > 0;
+  const hasResults = displayResults?.results?.length > 0;
+  const hasDbLeads = leadsFromDb.length > 0;
 
-  const doneCount = results?.results?.filter((r) => r.status === "done").length || 0;
-  const failedCount = results?.results?.filter((r) => r.status === "failed").length || 0;
+  const doneCount = displayResults?.results?.filter((r) => r.status === "done").length || 0;
+  const failedCount = displayResults?.results?.filter((r) => r.status === "failed").length || 0;
+  const dbDoneCount = leadsFromDb.filter((l) => l.messages).length || 0;
+  const dbPendingCount = queueStats?.pending || 0;
 
   return (
     <div className="max-w-7xl mx-auto px-6 py-8">
@@ -63,6 +84,22 @@ export function Dashboard({ isRunning, status, results, error, onRunAnalysis, on
             <p className="text-sm text-slate-500 mt-1">
               Automated B2B lead analysis &amp; message generation
             </p>
+            {queueStats && (
+              <div className="flex items-center gap-3 mt-2 text-xs">
+                {queueStats.pending > 0 && (
+                  <span className="flex items-center gap-1 text-amber-600">
+                    <Clock className="h-3.5 w-3.5" />
+                    {queueStats.pending} processing
+                  </span>
+                )}
+                {dbDoneCount > 0 && (
+                  <span className="flex items-center gap-1 text-emerald-600">
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                    {dbDoneCount} ready
+                  </span>
+                )}
+              </div>
+            )}
           </div>
           <Badge
             variant="outline"
@@ -199,7 +236,68 @@ export function Dashboard({ isRunning, status, results, error, onRunAnalysis, on
         </div>
       )}
 
-      {/* Results Summary */}
+      {/* Results Summary - from DB */}
+      {hasDbLeads && !isRunning && (
+        <section data-testid="results-section">
+          <div className="flex items-center justify-between mb-6">
+            <h2 className="text-2xl font-semibold tracking-tight text-[#1a2744]">
+              Ready Leads
+            </h2>
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-1.5 text-sm text-slate-500">
+                <Inbox className="h-4 w-4" />
+                <span>{leadsFromDb.length} total</span>
+              </div>
+              {dbDoneCount > 0 && (
+                <div className="flex items-center gap-1.5 text-sm text-emerald-600">
+                  <CheckCircle2 className="h-4 w-4" />
+                  <span>{dbDoneCount} analyzed</span>
+                </div>
+              )}
+              {dbPendingCount > 0 && (
+                <div className="flex items-center gap-1.5 text-sm text-amber-600">
+                  <Clock className="h-4 w-4" />
+                  <span>{dbPendingCount} processing</span>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="space-y-4" data-testid="results-list">
+            {leadsFromDb.map((lead, idx) => {
+              const leadResult = {
+                name: lead.full_name || "Unknown",
+                company: lead.company_name || "",
+                position: lead.position || "",
+                location: lead.location || "",
+                profileUrl: lead.profile_url || "",
+                headline: lead.headline || "",
+                intent: lead.intent || "",
+                intent_confidence: lead.confidence || "",
+                status: lead.messages ? "done" : "pending",
+                fit_score: lead.analysis?.qualification?.fit_score || 0,
+                qualification_status: lead.analysis?.qualification?.status || "",
+                executive_summary: lead.executive_summary || "",
+                analysis: lead.analysis || {},
+                messages: lead.messages?.messages || [],
+                recommended_top_3: lead.messages?.recommended_top_3 || [],
+                strategy_notes: lead.messages?.notes || "",
+              };
+              return (
+                <LeadCard
+                  key={idx}
+                  lead={leadResult}
+                  index={idx}
+                  isSelected={selectedLeads.has(leadResult.name)}
+                  onSelect={() => toggleSelect(leadResult.name)}
+                />
+              );
+            })}
+          </div>
+        </section>
+      )}
+
+      {/* Results Summary - from job */}
       {hasResults && (
         <section data-testid="results-section">
           <div className="flex items-center justify-between mb-6">
@@ -209,7 +307,7 @@ export function Dashboard({ isRunning, status, results, error, onRunAnalysis, on
             <div className="flex items-center gap-4">
               <div className="flex items-center gap-1.5 text-sm text-slate-500">
                 <Users className="h-4 w-4" />
-                <span>{results.results.length} leads</span>
+                <span>{displayResults.results.length} leads</span>
               </div>
               {doneCount > 0 && (
                 <div className="flex items-center gap-1.5 text-sm text-emerald-600">
@@ -238,7 +336,7 @@ export function Dashboard({ isRunning, status, results, error, onRunAnalysis, on
           </div>
 
           <div className="space-y-4" data-testid="results-list">
-            {results.results.map((lead, idx) => (
+            {displayResults.results.map((lead, idx) => (
               <LeadCard
                 key={idx}
                 lead={lead}
@@ -252,14 +350,25 @@ export function Dashboard({ isRunning, status, results, error, onRunAnalysis, on
       )}
 
       {/* Empty state when nothing has happened yet */}
-      {!isRunning && !status && !results && !error && (
+      {!isRunning && !status && !results && !hasDbLeads && !error && (
         <div className="text-center py-20" data-testid="empty-state">
           <BarChart3 className="h-16 w-16 text-slate-200 mx-auto mb-6" />
           <h3 className="text-lg font-semibold text-slate-500">Ready to analyze</h3>
-          <p className="text-sm text-slate-400 mt-2 max-w-md mx-auto">
-            Click "Run Analysis" to fetch unread LinkedIn conversations, classify each reply by intent,
-            and generate personalized follow-up messages.
+          <p className="text-sm text-slate-400 mt-2 max-w-md mx-auto mb-6">
+            Leads are automatically analyzed when they reply on LinkedIn.
+            Results will appear here instantly.
           </p>
+          <div className="flex items-center justify-center gap-3">
+            <Button
+              onClick={onRunAnalysis}
+              disabled={!selectedAccountId}
+              className="bg-[#10b981] hover:bg-[#059669] text-white h-12 px-8 text-base font-semibold rounded-lg shadow-sm transition-all active:scale-95 disabled:opacity-60"
+              data-testid="run-analysis-btn"
+            >
+              <Play className="mr-2 h-5 w-5" />
+              Run Manual Analysis
+            </Button>
+          </div>
         </div>
       )}
     </div>
