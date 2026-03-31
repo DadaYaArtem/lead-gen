@@ -37,10 +37,16 @@ npm test
 ### Testing
 
 ```bash
-# Integration tests — requires backend running on :8000
-python backend_test.py
+# Run all unit tests (from repo root)
+python -m pytest tests/ -v
 
-# Single test (no dedicated test runner; run the file directly)
+# Run a single test file
+python -m pytest tests/test_classifier.py -v
+
+# Run a single test
+python -m pytest tests/test_classifier.py::TestKeywordFallbackIntent::test_keyword_matching -v
+
+# Integration tests — requires backend running on :8000
 python backend_test.py
 ```
 
