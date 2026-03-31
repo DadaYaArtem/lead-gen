@@ -191,9 +191,9 @@ export function Dashboard({ isRunning, status, results, error, onRunAnalysis, on
           data-testid="no-leads-message"
         >
           <SearchX className="h-12 w-12 text-slate-300 mx-auto mb-4" />
-          <h3 className="text-lg font-semibold text-slate-700">No new Catch Up replies found</h3>
+          <h3 className="text-lg font-semibold text-slate-700">No conversations with recent replies found</h3>
           <p className="text-sm text-slate-500 mt-2 max-w-md mx-auto">
-            No unread conversations matched the "thank you" response pattern.
+            No unread conversations had a recent reply from your leads.
             Check back later or verify your HeyReach inbox.
           </p>
         </div>
@@ -257,7 +257,7 @@ export function Dashboard({ isRunning, status, results, error, onRunAnalysis, on
           <BarChart3 className="h-16 w-16 text-slate-200 mx-auto mb-6" />
           <h3 className="text-lg font-semibold text-slate-500">Ready to analyze</h3>
           <p className="text-sm text-slate-400 mt-2 max-w-md mx-auto">
-            Click "Run Analysis" to fetch unread LinkedIn conversations, filter Catch Up leads, 
+            Click "Run Analysis" to fetch unread LinkedIn conversations, classify each reply by intent,
             and generate personalized follow-up messages.
           </p>
         </div>
