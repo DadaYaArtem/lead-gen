@@ -98,7 +98,7 @@ export function LeadChatPanel({ lead, isOpen, onClose }) {
         <div className="mx-4 mt-3 mb-1 flex items-start gap-2 rounded-lg bg-emerald-50 border border-emerald-200 px-3 py-2.5 shrink-0">
           <Info className="h-4 w-4 text-emerald-600 mt-0.5 shrink-0" />
           <p className="text-xs text-emerald-700 leading-relaxed">
-            GPT-4o has full access to this lead's research, analysis, pain points, and company data.
+            GPT-5.1 has full access to this lead's research, analysis, pain points, and company data.
             Ask anything — strategy, objections, message ideas, or background info.
           </p>
         </div>
