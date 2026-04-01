@@ -325,25 +325,41 @@ def save_messages(lead_id: int, messages_data: Dict[str, Any]):
 
 
 def add_to_queue(conversation_id: str, account_id: int) -> Optional[int]:
-    """Add conversation to processing queue. Returns queue item ID or None if already queued."""
+    """
+    Add conversation to processing queue.
+    Returns queue item ID.
+    Returns None only if currently being processed (to prevent duplicate processing).
+    """
     with get_db_connection() as conn:
         cursor = conn.cursor()
         now = datetime.now(timezone.utc).isoformat()
-        
+
+        # Check if currently being processed (pending/processing)
         cursor.execute("""
-            SELECT id FROM processing_queue 
+            SELECT id, status FROM processing_queue
             WHERE conversation_id = ? AND status IN ('pending', 'processing')
+            ORDER BY created_at DESC LIMIT 1
         """, (conversation_id,))
         row = cursor.fetchone()
-        
+
         if row:
+            # Already being processed right now
             return None
-        
+
+        # Check if there's a completed entry - if so, create a new one for re-processing
+        # This allows multiple analyses of the same conversation as new messages arrive
+        cursor.execute("""
+            SELECT id FROM processing_queue
+            WHERE conversation_id = ? AND status = 'completed'
+            ORDER BY created_at DESC LIMIT 1
+        """, (conversation_id,))
+        # We don't return here - we want to add a new entry even if one exists
+
         cursor.execute("""
             INSERT INTO processing_queue (conversation_id, account_id, status, created_at)
             VALUES (?, ?, 'pending', ?)
         """, (conversation_id, account_id, now))
-        
+
         queue_id = cursor.lastrowid
         conn.commit()
         return queue_id
