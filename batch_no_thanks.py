@@ -884,7 +884,8 @@ def create_no_thanks_message_generation_prompt(analysis, metadata):
     lead_name = metadata.get('lead_name', 'Unknown')
     lead_company = metadata.get('lead_company', 'Unknown')
     lead_position = metadata.get('lead_position', 'Unknown')
-    first_name = lead_name.split()[0] if lead_name else 'there'
+    cleaned = lead_name.strip()
+    first_name = cleaned.split()[0] if cleaned else 'there'
     
     qual = analysis.get('qualification', {})
     company = analysis.get('company_basics', {})

@@ -15,7 +15,8 @@ def create_hard_rejection_messages_prompt(analysis: dict, lead_name: str, lead_c
     conv_analysis = analysis.get('conversation_analysis', {})
     rejection = conv_analysis.get('rejection_analysis', {})
 
-    first_name = lead_name.split()[0] if lead_name else 'there'
+    cleaned = lead_name.strip()
+    first_name = cleaned.split()[0] if cleaned else 'there'
 
     prompt = f"""You are an expert B2B sales copywriter for Interexy (software development company).
 

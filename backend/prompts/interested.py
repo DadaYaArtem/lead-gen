@@ -12,7 +12,8 @@ def create_interested_messages_prompt(analysis: dict, lead_name: str, lead_compa
     value_props = analysis.get('interexy_value_props', {})
     conv_analysis = analysis.get('conversation_analysis', {})
 
-    first_name = lead_name.split()[0] if lead_name else 'there'
+    cleaned = lead_name.strip()
+    first_name = cleaned.split()[0] if cleaned else 'there'
 
     role_pains = pain_points.get('role_specific_pain_points', [])[:3]
     stage_pains = pain_points.get('stage_specific_pain_points', [])[:3]
