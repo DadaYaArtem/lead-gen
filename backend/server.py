@@ -29,19 +29,13 @@ from webhook_handler import process_webhook_event
 
 HEYREACH_API_KEY = os.environ.get('HEYREACH_API_KEY')
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
-PROXY_URL = os.environ.get('PROXY_URL')  # e.g. http://proxy.server:3128 on PythonAnywhere
 
 _accounts_raw = os.environ.get('LINKEDIN_ACCOUNTS', '[]')
 LINKEDIN_ACCOUNTS = json.loads(_accounts_raw)
 
 
 def _make_client(timeout: int = 30) -> httpx.AsyncClient:
-    """Create httpx client, using proxy only if PROXY_URL is set."""
-    if PROXY_URL:
-        return httpx.AsyncClient(
-            transport=httpx.AsyncHTTPTransport(proxy=PROXY_URL),
-            timeout=timeout,
-        )
+    """Create httpx client for direct outbound requests (no proxy)."""
     return httpx.AsyncClient(timeout=timeout)
 
 app = FastAPI()
@@ -95,6 +89,27 @@ async def fetch_unread_conversations(account_id: int) -> list:
             offset += limit
 
     return all_items
+
+
+async def is_conversation_unseen(conversation_id: str, account_id: int) -> bool:
+    """Check if a specific conversation is still unseen (unread) in HeyReach."""
+    url = "https://api.heyreach.io/api/public/inbox/GetConversationsV2"
+    headers = {"X-API-KEY": HEYREACH_API_KEY, "Content-Type": "application/json"}
+    payload = {
+        "filters": {
+            "linkedInAccountIds": [account_id],
+            "conversationId": conversation_id,
+            "seen": False,
+        },
+        "offset": 0,
+        "limit": 1,
+    }
+    async with _make_client(timeout=15) as client:
+        response = await client.post(url, headers=headers, json=payload)
+        if response.status_code != 200:
+            raise Exception(f"HeyReach API error: {response.status_code}")
+        data = response.json()
+        return len(data.get('items', [])) > 0
 
 
 # ==================== OPENAI HELPERS ====================
@@ -577,37 +592,34 @@ async def cleanup_preview(request: CleanupRequest):
 async def cleanup_handled_leads(request: CleanupRequest):
     """
     Delete leads from DB that are no longer unseen in HeyReach.
-    If a lead is not in the unseen list, it means we already replied — safe to remove.
+    Checks each lead individually by its conversation_id (hex format from webhook).
     """
     from database import get_all_leads_for_account, delete_lead as db_delete_lead
 
     account_id = request.account_id
-
-    try:
-        unseen = await fetch_unread_conversations(account_id)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"HeyReach API error: {str(e)}")
-
-    unseen_ids = {conv.get('id') or conv.get('conversationId') for conv in unseen}
-    unseen_ids.discard(None)
-
-    if not unseen_ids:
-        logger.warning(f"Cleanup aborted: HeyReach returned 0 unseen IDs for account {account_id}. Refusing to delete all leads.")
-        return {"deleted": 0, "aborted": True, "reason": "HeyReach returned no unseen conversations — refusing to delete all leads to avoid data loss"}
-
     db_leads = get_all_leads_for_account(account_id)
+
+    if not db_leads:
+        return {"deleted": 0, "message": "No leads in database"}
+
     deleted = []
+    errors = []
     for lead in db_leads:
         cid = lead.get('conversation_id')
-        if cid and cid not in unseen_ids:
-            try:
+        if not cid:
+            continue
+        try:
+            still_unseen = await is_conversation_unseen(cid, account_id)
+            if not still_unseen:
                 db_delete_lead(cid)
                 deleted.append(cid)
-            except Exception as e:
-                logger.error(f"Failed to delete lead {cid} during cleanup: {e}")
+                logger.info(f"Cleanup: deleted handled lead {cid}")
+        except Exception as e:
+            logger.error(f"Cleanup: error checking lead {cid}: {e}")
+            errors.append(cid)
 
-    logger.info(f"Cleanup for account {account_id}: deleted {len(deleted)} handled leads")
-    return {"deleted": len(deleted), "conversation_ids": deleted}
+    logger.info(f"Cleanup for account {account_id}: deleted {len(deleted)}, errors {len(errors)}")
+    return {"deleted": len(deleted), "errors": len(errors), "conversation_ids": deleted}
 
 
 class RunAnalysisRequest(BaseModel):
