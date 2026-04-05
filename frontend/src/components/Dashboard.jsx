@@ -24,6 +24,7 @@ import {
   Inbox,
   Clock,
   Trash2,
+  Sparkles,
 } from "lucide-react";
 
 const API = process.env.REACT_APP_BACKEND_URL + '/api';
@@ -43,6 +44,35 @@ export function Dashboard({
   onAccountChange 
 }) {
   const [selectedLeads, setSelectedLeads] = useState(new Set());
+  const [isCleaning, setIsCleaning] = useState(false);
+
+  const handleCleanup = async () => {
+    if (!selectedAccountId) return;
+    if (!window.confirm("Remove all leads you've already replied to? This will delete them from the database.")) return;
+    setIsCleaning(true);
+    try {
+      const response = await fetch(`${API}/cleanup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ account_id: selectedAccountId }),
+      });
+      const data = await response.json();
+      if (response.ok) {
+        if (data.deleted > 0) {
+          toast.success(`Cleaned up ${data.deleted} handled lead${data.deleted > 1 ? 's' : ''}`);
+          setTimeout(() => window.location.reload(), 1000);
+        } else {
+          toast.info("Nothing to clean up — no handled leads found");
+        }
+      } else {
+        toast.error(data?.detail || "Cleanup failed");
+      }
+    } catch (e) {
+      toast.error(`Cleanup failed: ${e.message || 'Network error'}`);
+    } finally {
+      setIsCleaning(false);
+    }
+  };
 
   const toggleSelect = (name) => {
     setSelectedLeads((prev) => {
@@ -186,6 +216,25 @@ export function Dashboard({
               <>
                 <Play className="mr-2 h-5 w-5" />
                 Run Analysis
+              </>
+            )}
+          </Button>
+          <Button
+            onClick={handleCleanup}
+            disabled={isCleaning || !selectedAccountId}
+            variant="outline"
+            className="h-12 px-5 text-sm font-medium border-slate-300 text-slate-600 hover:bg-red-50 hover:text-red-600 hover:border-red-300 transition-colors disabled:opacity-60"
+            title="Remove leads you've already replied to"
+          >
+            {isCleaning ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Cleaning...
+              </>
+            ) : (
+              <>
+                <Sparkles className="mr-2 h-4 w-4" />
+                Clean up handled
               </>
             )}
           </Button>

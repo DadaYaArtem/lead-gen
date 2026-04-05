@@ -58,27 +58,35 @@ async def startup_event():
 # ==================== HEYREACH API ====================
 
 async def fetch_unread_conversations(account_id: int) -> list:
-    """Fetch all unread conversations from HeyReach API"""
+    """Fetch ALL unread conversations from HeyReach API, paginating if needed."""
     url = "https://api.heyreach.io/api/public/inbox/GetConversationsV2"
     headers = {"X-API-KEY": HEYREACH_API_KEY, "Content-Type": "application/json"}
-    payload = {
-        "filters": {
-            "linkedInAccountIds": [account_id],
-            "seen": False
-        },
-        "offset": 0,
-        "limit": 50
-    }
+    limit = 50
+    all_items = []
+    offset = 0
 
     async with httpx.AsyncClient(
         transport=httpx.AsyncHTTPTransport(proxy="http://proxy.server:3128"),
         timeout=30,
     ) as client:
-        response = await client.post(url, headers=headers, json=payload)
-        if response.status_code != 200:
-            raise Exception(f"HeyReach API error: {response.status_code} - {response.text}")
-        data = response.json()
-        return data.get('items', [])
+        while True:
+            payload = {
+                "filters": {"linkedInAccountIds": [account_id], "seen": False},
+                "offset": offset,
+                "limit": limit,
+            }
+            response = await client.post(url, headers=headers, json=payload)
+            if response.status_code != 200:
+                raise Exception(f"HeyReach API error: {response.status_code} - {response.text}")
+            data = response.json()
+            items = data.get('items', [])
+            all_items.extend(items)
+            # If we got fewer than the limit, we've fetched everything
+            if len(items) < limit:
+                break
+            offset += limit
+
+    return all_items
 
 
 # ==================== OPENAI HELPERS ====================
@@ -521,6 +529,43 @@ async def delete_lead(conversation_id: str):
     except Exception as e:
         logger.error(f"Error deleting lead {conversation_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete lead: {str(e)}")
+
+
+class CleanupRequest(BaseModel):
+    account_id: int
+
+
+@api_router.post("/cleanup")
+async def cleanup_handled_leads(request: CleanupRequest):
+    """
+    Delete leads from DB that are no longer unseen in HeyReach.
+    If a lead is not in the unseen list, it means we already replied — safe to remove.
+    """
+    from database import get_all_leads_for_account, delete_lead as db_delete_lead
+
+    account_id = request.account_id
+
+    try:
+        unseen = await fetch_unread_conversations(account_id)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"HeyReach API error: {str(e)}")
+
+    unseen_ids = {conv.get('id') or conv.get('conversationId') for conv in unseen}
+    unseen_ids.discard(None)
+
+    db_leads = get_all_leads_for_account(account_id)
+    deleted = []
+    for lead in db_leads:
+        cid = lead.get('conversation_id')
+        if cid and cid not in unseen_ids:
+            try:
+                db_delete_lead(cid)
+                deleted.append(cid)
+            except Exception as e:
+                logger.error(f"Failed to delete lead {cid} during cleanup: {e}")
+
+    logger.info(f"Cleanup for account {account_id}: deleted {len(deleted)} handled leads")
+    return {"deleted": len(deleted), "conversation_ids": deleted}
 
 
 class RunAnalysisRequest(BaseModel):
