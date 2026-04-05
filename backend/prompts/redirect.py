@@ -12,7 +12,7 @@ def create_redirect_messages_prompt(analysis: dict, lead_name: str, lead_company
     value_props = analysis.get('interexy_value_props', {})
     conv_analysis = analysis.get('conversation_analysis', {})
 
-    first_name = lead_name.split()[0] if lead_name else 'there'
+    first_name = lead_name.strip().split()[0] if lead_name and lead_name.strip() else 'there'
 
     role_pains = pain_points.get('role_specific_pain_points', [])[:3]
     stage_pains = pain_points.get('stage_specific_pain_points', [])[:3]

@@ -57,6 +57,10 @@ out/
 # Task files (internal)
 .TASKS
 
+# AI assistant config (not source)
+.qwen/
+.github/copilot-instructions.md
+
 # SQLite database files (runtime, not source)
 backend/leads.db
 *.db

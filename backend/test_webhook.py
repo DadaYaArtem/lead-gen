@@ -31,22 +31,23 @@ test_payload = {
     }
 }
 
-print("=" * 60)
-print("Testing HeyReach Webhook Endpoint")
-print("=" * 60)
-print(f"URL: {WEBHOOK_URL}")
-print(f"Payload: {json.dumps(test_payload, indent=2)}")
-print("-" * 60)
+if __name__ == "__main__":
+    print("=" * 60)
+    print("Testing HeyReach Webhook Endpoint")
+    print("=" * 60)
+    print(f"URL: {WEBHOOK_URL}")
+    print(f"Payload: {json.dumps(test_payload, indent=2)}")
+    print("-" * 60)
 
-try:
-    response = requests.post(WEBHOOK_URL, json=test_payload, timeout=10)
-    print(f"Status: {response.status_code}")
-    print(f"Response: {response.json()}")
-except requests.exceptions.ConnectionError:
-    print("ERROR: Could not connect to backend. Is it running on port 8000?")
-except requests.exceptions.Timeout:
-    print("ERROR: Request timed out")
-except Exception as e:
-    print(f"ERROR: {e}")
+    try:
+        response = requests.post(WEBHOOK_URL, json=test_payload, timeout=10)
+        print(f"Status: {response.status_code}")
+        print(f"Response: {response.json()}")
+    except requests.exceptions.ConnectionError:
+        print("ERROR: Could not connect to backend. Is it running on port 8000?")
+    except requests.exceptions.Timeout:
+        print("ERROR: Request timed out")
+    except Exception as e:
+        print(f"ERROR: {e}")
 
-print("=" * 60)
+    print("=" * 60)

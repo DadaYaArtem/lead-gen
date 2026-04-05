@@ -42,7 +42,7 @@ def _create_catchup_messages_prompt_original(analysis: dict, lead_name: str, lea
     hooks = '\n'.join(f"- {h}" for h in recommended.get('personalization_hooks', []))
     vps = '\n'.join(f"- {v}" for v in value_props.get('most_relevant', []))
 
-    first_name = lead_name.split()[0] if lead_name else 'there'
+    first_name = lead_name.strip().split()[0] if lead_name and lead_name.strip() else 'there'
 
     _INTENT_CONTEXT = {
         "catchup_thanks": (
