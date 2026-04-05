@@ -47,7 +47,8 @@ async def fetch_conversation_from_heyreach(conversation_id: str, account_id: int
     }
     
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
+        from server import _make_client
+        async with _make_client(timeout=30) as client:
             response = await client.post(url, headers=headers, json=payload)
             if response.status_code != 200:
                 logger.error(f"HeyReach API error: {response.status_code} - {response.text[:200]}")

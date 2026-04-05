@@ -29,9 +29,20 @@ from webhook_handler import process_webhook_event
 
 HEYREACH_API_KEY = os.environ.get('HEYREACH_API_KEY')
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
+PROXY_URL = os.environ.get('PROXY_URL')  # e.g. http://proxy.server:3128 on PythonAnywhere
 
 _accounts_raw = os.environ.get('LINKEDIN_ACCOUNTS', '[]')
 LINKEDIN_ACCOUNTS = json.loads(_accounts_raw)
+
+
+def _make_client(timeout: int = 30) -> httpx.AsyncClient:
+    """Create httpx client, using proxy only if PROXY_URL is set."""
+    if PROXY_URL:
+        return httpx.AsyncClient(
+            transport=httpx.AsyncHTTPTransport(proxy=PROXY_URL),
+            timeout=timeout,
+        )
+    return httpx.AsyncClient(timeout=timeout)
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
@@ -65,10 +76,7 @@ async def fetch_unread_conversations(account_id: int) -> list:
     all_items = []
     offset = 0
 
-    async with httpx.AsyncClient(
-        transport=httpx.AsyncHTTPTransport(proxy="http://proxy.server:3128"),
-        timeout=30,
-    ) as client:
+    async with _make_client(timeout=30) as client:
         while True:
             payload = {
                 "filters": {"linkedInAccountIds": [account_id], "seen": False},
@@ -128,10 +136,7 @@ async def call_openai(prompt: str, use_web_search: bool = False, timeout_sec: in
         "input": prompt
     }
 
-    async with httpx.AsyncClient(
-        transport=httpx.AsyncHTTPTransport(proxy="http://proxy.server:3128"),
-        timeout=timeout_sec,
-    ) as client:
+    async with _make_client(timeout=timeout_sec) as client:
         response = await client.post(url, headers=headers, json=payload)
         if response.status_code != 200:
             raise Exception(f"OpenAI API error: {response.status_code} - {response.text[:500]}")
@@ -168,10 +173,7 @@ async def call_openai_chat(system_prompt: str, messages: list, timeout_sec: int 
         ],
     }
 
-    async with httpx.AsyncClient(
-        transport=httpx.AsyncHTTPTransport(proxy="http://proxy.server:3128"),
-        timeout=timeout_sec,
-    ) as client:
+    async with _make_client(timeout=timeout_sec) as client:
         response = await client.post(url, headers=headers, json=payload)
         if response.status_code != 200:
             raise Exception(f"OpenAI API error: {response.status_code} - {response.text[:500]}")
