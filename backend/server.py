@@ -537,6 +537,42 @@ class CleanupRequest(BaseModel):
     account_id: int
 
 
+@api_router.post("/cleanup/preview")
+async def cleanup_preview(request: CleanupRequest):
+    """
+    Dry-run: shows what cleanup would delete without actually deleting.
+    Also returns raw HeyReach unseen data so we can verify field names.
+    """
+    from database import get_all_leads_for_account
+
+    account_id = request.account_id
+
+    try:
+        unseen = await fetch_unread_conversations(account_id)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"HeyReach API error: {str(e)}")
+
+    # Show first item's keys so we know what fields HeyReach returns
+    sample_keys = list(unseen[0].keys()) if unseen else []
+    sample_id_fields = {k: unseen[0].get(k) for k in ('id', 'conversationId', 'conversation_id') if unseen and unseen[0].get(k)} if unseen else {}
+
+    unseen_ids = {conv.get('id') or conv.get('conversationId') for conv in unseen}
+    unseen_ids.discard(None)
+
+    db_leads = get_all_leads_for_account(account_id)
+    would_delete = [l.get('conversation_id') for l in db_leads if l.get('conversation_id') and l.get('conversation_id') not in unseen_ids]
+
+    return {
+        "unseen_count": len(unseen),
+        "unseen_ids_sample": list(unseen_ids)[:5],
+        "heyreach_field_keys": sample_keys,
+        "heyreach_id_fields": sample_id_fields,
+        "db_leads_count": len(db_leads),
+        "would_delete_count": len(would_delete),
+        "would_delete": would_delete,
+    }
+
+
 @api_router.post("/cleanup")
 async def cleanup_handled_leads(request: CleanupRequest):
     """
@@ -554,6 +590,10 @@ async def cleanup_handled_leads(request: CleanupRequest):
 
     unseen_ids = {conv.get('id') or conv.get('conversationId') for conv in unseen}
     unseen_ids.discard(None)
+
+    if not unseen_ids:
+        logger.warning(f"Cleanup aborted: HeyReach returned 0 unseen IDs for account {account_id}. Refusing to delete all leads.")
+        return {"deleted": 0, "aborted": True, "reason": "HeyReach returned no unseen conversations — refusing to delete all leads to avoid data loss"}
 
     db_leads = get_all_leads_for_account(account_id)
     deleted = []
