@@ -70,7 +70,10 @@ async def fetch_unread_conversations(account_id: int) -> list:
         "limit": 50
     }
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(
+        transport=httpx.AsyncHTTPTransport(proxy="http://proxy.server:3128"),
+        timeout=30,
+    ) as client:
         response = await client.post(url, headers=headers, json=payload)
         if response.status_code != 200:
             raise Exception(f"HeyReach API error: {response.status_code} - {response.text}")
@@ -117,7 +120,10 @@ async def call_openai(prompt: str, use_web_search: bool = False, timeout_sec: in
         "input": prompt
     }
 
-    async with httpx.AsyncClient(timeout=timeout_sec) as client:
+    async with httpx.AsyncClient(
+        transport=httpx.AsyncHTTPTransport(proxy="http://proxy.server:3128"),
+        timeout=timeout_sec,
+    ) as client:
         response = await client.post(url, headers=headers, json=payload)
         if response.status_code != 200:
             raise Exception(f"OpenAI API error: {response.status_code} - {response.text[:500]}")
@@ -154,7 +160,10 @@ async def call_openai_chat(system_prompt: str, messages: list, timeout_sec: int 
         ],
     }
 
-    async with httpx.AsyncClient(timeout=timeout_sec) as client:
+    async with httpx.AsyncClient(
+        transport=httpx.AsyncHTTPTransport(proxy="http://proxy.server:3128"),
+        timeout=timeout_sec,
+    ) as client:
         response = await client.post(url, headers=headers, json=payload)
         if response.status_code != 200:
             raise Exception(f"OpenAI API error: {response.status_code} - {response.text[:500]}")
