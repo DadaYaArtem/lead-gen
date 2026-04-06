@@ -2,9 +2,9 @@
 
 ## Project Overview
 
-B2B sales intelligence tool that fetches LinkedIn conversations from HeyReach, classifies each reply by intent (10 types) using GPT-4o-mini, runs deep company/profile research via GPT-4o with web search, generates 10–15 personalized follow-up message variants per lead, and provides a per-lead AI chat interface backed by GPT-5.1 with web search.
+B2B sales intelligence tool that fetches LinkedIn conversations from HeyReach, classifies each reply by intent (10 types) using GPT-4o-mini, runs deep company/profile research via GPT-4o with web search, generates 10–15 personalized follow-up message variants per lead, provides a per-lead AI chat interface backed by GPT-5.1 with web search, and includes a standalone Case Library with RAG-powered portfolio search.
 
-**Stack:** Python 3.11+ FastAPI backend · React 19 frontend · Tailwind CSS + Shadcn UI · OpenAI GPT-4o / GPT-4o-mini / GPT-5.1 · HeyReach API · SQLite (via `aiosqlite`)
+**Stack:** Python 3.11+ FastAPI backend · React 19 frontend · Tailwind CSS + Shadcn UI · OpenAI GPT-4o / GPT-4o-mini / GPT-5.1 · HeyReach API · SQLite (via `aiosqlite`) · `text-embedding-3-small` (RAG) · `react-markdown` + `remark-gfm`
 
 ---
 
@@ -71,6 +71,7 @@ backend/
 ├── database.py          # SQLite persistence layer (aiosqlite); leads, queue tables
 ├── webhook_handler.py   # HeyReach webhook processing + smart re-analysis logic
 ├── queue_processor.py   # Background async loop: picks from queue → classify → analyze → save
+├── rag.py               # RAG engine: load cases, embed, cache, retrieve (text-embedding-3-small)
 ├── prompts/
 │   ├── __init__.py          # Re-exports all prompt builder functions
 │   ├── base_research.py     # Universal lead research prompt (GPT-4o + web search)
@@ -80,7 +81,11 @@ backend/
 │   ├── hard_rejection.py    # Response strategy for hard_rejection
 │   ├── question.py          # Message generation for question intent
 │   ├── redirect.py          # Message generation for redirect intent
-│   └── chat.py              # System prompt builder for per-lead AI chat
+│   ├── chat.py              # System prompt builder for per-lead AI chat (with RAG)
+│   └── case_chat.py         # System prompt builder for standalone Case Library chat
+├── knowledge_base/
+│   ├── RAG_GUIDE.md         # How to add/format case files
+│   └── cases/               # 10 real case .md files with YAML frontmatter
 └── requirements.txt
 ```
 
@@ -125,6 +130,26 @@ backend/
 - Full conversation history is sent on every request (API is stateless — no server-side session).
 - **Lookup order** in `/api/chat`: (1) SQLite by `conversation_id`, (2) in-memory jobs by `job_id` + `lead_name` — chat works both after page reload and during a live analysis session.
 - The "Ask AI" button renders when `lead.conversation_id` exists — this is always present for DB leads and is also attached to in-memory leads via the pipeline, so it survives page reloads.
+- **RAG integration**: `create_chat_system_prompt(lead, retrieved_cases)` optionally receives case excerpts. `/api/chat` calls `retrieve_cases(query)` with the user's latest message and injects top-K results into the system prompt automatically.
+
+### RAG Engine (`rag.py`)
+
+- **Knowledge base**: `backend/knowledge_base/cases/` — `.md` files with YAML frontmatter.
+- **Case file format**: `---` delimited YAML block with `title`, `industry` (list), `tech_stack` (list), `client_type` (enterprise/scaleup/startup), `region`. Russian-language markdown body follows.
+- **Frontmatter parser**: `_parse_frontmatter()` — manual YAML parser (no PyYAML dep). Handles `key: value` and list items (`  - item`).
+- **Embeddings**: `text-embedding-3-small` via OpenAI API. Cached in `backend/embeddings_cache.json` (gitignored) keyed by case ID with MD5 hash for invalidation.
+- **Retrieval**: cosine similarity. Threshold = 0.35. If nothing exceeds threshold, fallback returns top-K above floor = 0.05 (handles navigation queries like "покажи кейсы").
+- **Multilingual**: `_normalize_query()` — detects non-ASCII queries (Russian etc.) → translates to English keywords via `gpt-4o-mini` before embedding. ASCII queries skip this step.
+- **API**: `GET /api/knowledge-base` returns metadata list; `retrieve_cases(query, top_k)` returns matched case dicts with `score` field.
+
+### Case Library Page (`CasesPage.jsx` + `/api/case-chat`)
+
+- Standalone page accessible via "Case Library" tab in the header nav.
+- Left sidebar: list of all cases via `GET /api/knowledge-base`. `CaseCard` shows `client_type` badge (violet=enterprise, blue=scaleup, amber=startup), industry + region row, tech stack pills.
+- Right pane: chat interface with suggestion chips. Uses `POST /api/case-chat` (no lead context, RAG-only).
+- Retrieved case pills shown above AI replies to indicate which cases were used.
+- `create_case_chat_system_prompt(retrieved_cases)` in `prompts/case_chat.py` — formats injected cases, instructs GPT-5.1 to act as portfolio advisor.
+- Supports all 5 query intents (Find / Explain / Extract / Recommend / Generate) — GPT interprets intent from natural language, no separate classifier needed.
 
 ### Intent Classification (10 types)
 
@@ -147,10 +172,13 @@ Only conversations where CORRESPONDENT appears in last 5 messages are processed;
 
 ### Frontend (`frontend/src/`)
 
-- `App.js` owns all state (`jobId`, `status`, `results`, `isRunning`, `error`, `accounts`, `selectedAccountId`).
-- `Dashboard.jsx` receives state + callbacks as props; renders header, account selector, progress, results, and DB-backed lead list (`leadsFromDb`).
+- `App.js` owns all state (`jobId`, `status`, `results`, `isRunning`, `error`, `accounts`, `selectedAccountId`, `currentPage`).
+  - `currentPage`: `"dashboard"` | `"cases"`. Controls which page is rendered and whether `h-screen overflow-hidden` layout is applied (Cases only).
+- `Dashboard.jsx` — nav tabs ("Lead Analysis" / "Case Library"), account selector, progress, results, DB lead list.
+- `CasesPage.jsx` — full-page fixed layout: sidebar (case cards) + main chat pane. Uses `POST /api/case-chat`.
 - `LeadCard.jsx` → `MessageGroup.jsx` (leaf). Shows `IntentBadge`, "Ask AI" button (when `lead.conversation_id` present), and delete button.
-- `LeadChatPanel.jsx` — ShadCN `Sheet` side panel; sends `conversation_id` in requests; renders chat history with markdown-like formatting.
+- `LeadChatPanel.jsx` — ShadCN `Sheet` side panel; sends `conversation_id` in requests; AI bubbles rendered with `MarkdownMessage`.
+- `MarkdownMessage.jsx` — shared component; renders AI markdown responses via `react-markdown` + `remark-gfm` with full prose styling (headings, lists, code, tables, links). User bubbles stay plain text.
 - **Polling**: `setInterval` every 3 s against `GET /api/status/{job_id}`; cleared via `useRef` on cleanup/completion.
 - No external state manager (no Redux/Zustand); plain `useState` + prop drilling is intentional.
 
@@ -160,10 +188,10 @@ Only conversations where CORRESPONDENT appears in last 5 messages are processed;
 tests/
 ├── conftest.py          # Pytest fixtures: 10 conversation types + minimal_analysis
 ├── test_classifier.py   # 39 tests for classifier.py
-└── test_prompts.py      # 46 tests for prompts/
+└── test_prompts.py      # 116 tests for prompts/ (all 8 prompt files)
 ```
 
-86 tests total, all passing.
+155 tests total, all passing.
 
 ### API Endpoints
 
@@ -181,6 +209,8 @@ tests/
 | GET | `/api/status/{job_id}` | Poll live pipeline progress |
 | GET | `/api/results/{job_id}` | Fetch full results from in-memory job |
 | POST | `/api/chat` | `{"conversation_id": str, "messages": [...], "lead_name": str}` → GPT-5.1 reply |
+| GET | `/api/knowledge-base` | List all case metadata (id, title, industry, tech_stack, client_type, region) |
+| POST | `/api/case-chat` | `{"messages": [...]}` → RAG retrieval + GPT-5.1 reply (no lead context) |
 
 ### Environment Variables
 
