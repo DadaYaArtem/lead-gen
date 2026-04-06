@@ -14,6 +14,7 @@ import {
   Sparkles,
   MessageSquare,
 } from "lucide-react";
+import { MarkdownMessage } from "@/components/MarkdownMessage";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "http://localhost:8000";
 const API = `${BACKEND_URL}/api`;
@@ -291,13 +292,13 @@ function CaseChatBubble({ message }) {
       <div className={`flex flex-col gap-1.5 max-w-[85%] ${isUser ? "items-end" : "items-start"}`}>
         {/* Bubble */}
         <div
-          className={`rounded-2xl px-4 py-3 text-sm leading-relaxed whitespace-pre-wrap ${
+          className={`rounded-2xl px-4 py-3 text-sm leading-relaxed ${
             isUser
-              ? "bg-[#1a2744] text-white rounded-tr-sm"
+              ? "bg-[#1a2744] text-white rounded-tr-sm whitespace-pre-wrap"
               : "bg-white border border-slate-200 text-slate-800 rounded-tl-sm shadow-sm"
           }`}
         >
-          {message.content}
+          <MarkdownMessage content={message.content} isUser={isUser} />
         </div>
 
         {/* Retrieved cases pills */}
