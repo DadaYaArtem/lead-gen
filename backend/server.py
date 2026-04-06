@@ -29,13 +29,19 @@ from webhook_handler import process_webhook_event
 
 HEYREACH_API_KEY = os.environ.get('HEYREACH_API_KEY')
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
+PROXY_URL = os.environ.get('PROXY_URL')  # set to http://proxy.server:3128 on PythonAnywhere
 
 _accounts_raw = os.environ.get('LINKEDIN_ACCOUNTS', '[]')
 LINKEDIN_ACCOUNTS = json.loads(_accounts_raw)
 
 
 def _make_client(timeout: int = 30) -> httpx.AsyncClient:
-    """Create httpx client for direct outbound requests (no proxy)."""
+    """Create httpx client, using proxy only if PROXY_URL env var is set."""
+    if PROXY_URL:
+        return httpx.AsyncClient(
+            transport=httpx.AsyncHTTPTransport(proxy=PROXY_URL),
+            timeout=timeout,
+        )
     return httpx.AsyncClient(timeout=timeout)
 
 app = FastAPI()
