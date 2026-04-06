@@ -13,6 +13,8 @@ import {
   Building2,
   Sparkles,
   MessageSquare,
+  MapPin,
+  Layers,
 } from "lucide-react";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
 
@@ -229,33 +231,62 @@ export function CasesPage() {
 function CaseCard({ case_ }) {
   const isPopulated = case_.is_populated;
 
+  const clientTypeColors = {
+    enterprise: "bg-violet-50 text-violet-700 border-violet-200",
+    scaleup: "bg-blue-50 text-blue-700 border-blue-200",
+    startup: "bg-amber-50 text-amber-700 border-amber-200",
+  };
+  const clientTypeBadge = clientTypeColors[case_.client_type] || "bg-slate-100 text-slate-500 border-slate-200";
+
+  // industry and tech_stack are arrays from the new frontmatter format
+  const industryList = Array.isArray(case_.industry) ? case_.industry : (case_.industry ? [case_.industry] : []);
+  const techList = Array.isArray(case_.tech_stack) ? case_.tech_stack : (case_.tech_stack ? [case_.tech_stack] : []);
+
   return (
     <div
-      className={`mx-3 mb-1 rounded-lg border px-3 py-2.5 transition-colors ${
+      className={`mx-3 mb-1.5 rounded-lg border px-3 py-2.5 transition-colors ${
         isPopulated
           ? "border-slate-200 bg-white hover:border-[#10b981]/40 hover:bg-emerald-50/30"
           : "border-dashed border-slate-200 bg-slate-50 opacity-60"
       }`}
       data-testid={`case-card-${case_.id}`}
     >
-      <p className="text-xs font-medium text-[#1a2744] leading-tight">{case_.title}</p>
+      {/* Title + client type badge */}
+      <div className="flex items-start justify-between gap-1">
+        <p className="text-xs font-semibold text-[#1a2744] leading-tight flex-1">{case_.title}</p>
+        {case_.client_type && (
+          <span className={`text-[9px] font-medium border rounded px-1.5 py-0.5 shrink-0 ${clientTypeBadge}`}>
+            {case_.client_type}
+          </span>
+        )}
+      </div>
 
-      {case_.industry && (
-        <div className="flex items-center gap-1 mt-1">
-          <Building2 className="h-3 w-3 text-slate-400 shrink-0" />
-          <span className="text-[10px] text-slate-500">{case_.industry}</span>
-        </div>
-      )}
+      {/* Industry + Region */}
+      <div className="flex items-center gap-3 mt-1.5">
+        {industryList.length > 0 && (
+          <div className="flex items-center gap-1">
+            <Building2 className="h-3 w-3 text-slate-400 shrink-0" />
+            <span className="text-[10px] text-slate-500">{industryList.slice(0, 2).join(", ")}</span>
+          </div>
+        )}
+        {case_.region && (
+          <div className="flex items-center gap-1">
+            <MapPin className="h-3 w-3 text-slate-400 shrink-0" />
+            <span className="text-[10px] text-slate-500">{case_.region}</span>
+          </div>
+        )}
+      </div>
 
-      {case_.tags && case_.tags.length > 0 && (
+      {/* Tech stack pills */}
+      {techList.length > 0 && (
         <div className="flex items-start gap-1 mt-1.5 flex-wrap">
-          <Tag className="h-3 w-3 text-slate-400 shrink-0 mt-0.5" />
-          {case_.tags.slice(0, 3).map((tag) => (
+          <Layers className="h-3 w-3 text-slate-400 shrink-0 mt-0.5" />
+          {techList.slice(0, 4).map((tech) => (
             <span
-              key={tag}
+              key={tech}
               className="text-[9px] bg-slate-100 text-slate-500 rounded px-1 py-0.5 font-mono"
             >
-              {tag}
+              {tech}
             </span>
           ))}
         </div>

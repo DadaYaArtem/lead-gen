@@ -44,12 +44,56 @@ def _md5(text: str) -> str:
     return hashlib.md5(text.encode("utf-8")).hexdigest()
 
 
+def _parse_frontmatter(content: str) -> tuple[Dict[str, Any], str]:
+    """Parse YAML-style frontmatter from a markdown file.
+
+    Expects the file to start with `---`, followed by key: value lines
+    (including `  - list items`), and closed by another `---`.
+
+    Returns (metadata_dict, body_text). If no frontmatter found, returns
+    ({}, original content).
+    """
+    lines = content.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}, content
+
+    meta: Dict[str, Any] = {}
+    current_key: Optional[str] = None
+    end_idx = len(lines)
+
+    for i, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            end_idx = i
+            break
+        if line.startswith("  - ") or line.startswith("- "):
+            # List item under current_key
+            item = line.strip().lstrip("- ").strip()
+            if current_key and isinstance(meta.get(current_key), list):
+                meta[current_key].append(item)
+        elif ":" in line and not line.startswith(" "):
+            key, _, val = line.partition(":")
+            key = key.strip()
+            val = val.strip()
+            if val:
+                meta[key] = val
+            else:
+                # Empty value → list follows
+                meta[key] = []
+                current_key = key
+        # Ignore other lines (blank, nested, etc.)
+
+    body = "\n".join(lines[end_idx + 1:]).strip()
+    return meta, body
+
+
 def load_cases() -> List[Dict[str, Any]]:
     """Load all .md case files from knowledge_base/cases/.
 
-    Returns a list of dicts with keys: id, title, content, path, hash.
-    Files with empty content (placeholders) are included — they just won't
-    match any query meaningfully.
+    Parses YAML frontmatter (industry, tech_stack, client_type, region) and
+    extracts the title from the first # heading.
+
+    Returns a list of dicts with keys:
+      id, title, content, path, hash, industry, tech_stack, client_type, region
     """
     if not _CASES_DIR.exists():
         logger.warning(f"Cases directory not found: {_CASES_DIR}")
@@ -58,9 +102,11 @@ def load_cases() -> List[Dict[str, Any]]:
     cases = []
     for md_file in sorted(_CASES_DIR.glob("*.md")):
         content = md_file.read_text(encoding="utf-8").strip()
-        # Extract title from first # heading, fall back to filename
+        meta, body = _parse_frontmatter(content)
+
+        # Title: first # heading in body, fallback to filename
         title = md_file.stem.replace("_", " ").title()
-        for line in content.splitlines():
+        for line in body.splitlines():
             if line.startswith("# "):
                 title = line[2:].strip()
                 break
@@ -68,9 +114,15 @@ def load_cases() -> List[Dict[str, Any]]:
         cases.append({
             "id": md_file.stem,
             "title": title,
-            "content": content,
+            "content": content,   # full content (frontmatter + body) for embedding
+            "body": body,         # body only (for display)
             "path": str(md_file),
             "hash": _md5(content),
+            # Metadata from frontmatter
+            "industry": meta.get("industry", []) if isinstance(meta.get("industry"), list) else [meta.get("industry", "")],
+            "tech_stack": meta.get("tech_stack", []) if isinstance(meta.get("tech_stack"), list) else [meta.get("tech_stack", "")],
+            "client_type": meta.get("client_type", ""),
+            "region": meta.get("region", ""),
         })
 
     logger.info(f"Loaded {len(cases)} case(s) from knowledge base")
@@ -268,30 +320,21 @@ async def retrieve_cases(
 
 # ─────────────────────────── Metadata (for API listing) ──────────────────────
 
-def get_cases_metadata() -> List[Dict[str, str]]:
+def get_cases_metadata() -> List[Dict[str, Any]]:
     """Return lightweight metadata for all cases (no embeddings, no full content).
 
     Used by GET /api/knowledge-base.
     """
     cases = load_cases()
-    result = []
-    for c in cases:
-        # Extract industry/tags from the markdown front-matter-style fields
-        lines = c["content"].splitlines()
-        industry = ""
-        tags: List = []
-        for line in lines:
-            if line.startswith("**Industry:**"):
-                industry = line.split(":", 1)[1].strip().lstrip("*")
-            elif line.startswith("**Tags:**"):
-                raw = line.split(":", 1)[1].strip().lstrip("*").strip()
-                tags = [t.strip() for t in raw.split(",") if t.strip()]
-
-        result.append({
+    return [
+        {
             "id": c["id"],
             "title": c["title"],
-            "industry": industry,
-            "tags": tags,
+            "industry": c["industry"],        # list
+            "tech_stack": c["tech_stack"],    # list
+            "client_type": c["client_type"],  # "enterprise" | "scaleup" | "startup" | ""
+            "region": c["region"],            # "DACH" | "UK" | "US" | etc.
             "is_populated": len(c["content"]) > 100,
-        })
-    return result
+        }
+        for c in cases
+    ]
