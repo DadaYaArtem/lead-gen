@@ -22,7 +22,7 @@ async def process_single_lead(
     Returns True if successful, False otherwise.
     """
     from database import save_analysis, save_messages
-    from prompts import create_analysis_prompt, create_catchup_messages_prompt, create_no_thanks_messages_prompt
+    from prompts import create_analysis_prompt, create_catchup_messages_prompt, create_no_thanks_messages_prompt, create_hard_rejection_messages_prompt
     from server import call_openai
     
     profile = conversation.get('correspondentProfile', {})
@@ -45,6 +45,10 @@ async def process_single_lead(
         logger.info(f"Generating messages for {lead_name}")
         
         if intent == 'soft_objection':
+            msg_prompt = create_no_thanks_messages_prompt(
+                analysis, lead_name, lead_company, lead_position
+            )
+        elif intent == 'hard_rejection':
             msg_prompt = create_no_thanks_messages_prompt(
                 analysis, lead_name, lead_company, lead_position
             )
@@ -128,7 +132,7 @@ async def queue_processor():
                 logger.info(f"Classification saved: {intent} (confidence={confidence})")
                 
                 # Skip analysis for certain intents
-                if intent in ['hard_rejection', 'ooo', 'competitor']:
+                if intent in ['ooo', 'competitor']:
                     logger.info(f"Skipping deep analysis for intent={intent}, lead={lead_id}")
                     update_queue_status(queue_id, 'completed')
                     continue
