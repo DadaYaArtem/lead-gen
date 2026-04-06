@@ -203,12 +203,13 @@ def get_cases_metadata() -> List[Dict[str, str]]:
         # Extract industry/tags from the markdown front-matter-style fields
         lines = c["content"].splitlines()
         industry = ""
-        tags = ""
+        tags: List = []
         for line in lines:
             if line.startswith("**Industry:**"):
                 industry = line.split(":", 1)[1].strip().lstrip("*")
             elif line.startswith("**Tags:**"):
-                tags = line.split(":", 1)[1].strip().lstrip("*")
+                raw = line.split(":", 1)[1].strip().lstrip("*").strip()
+                tags = [t.strip() for t in raw.split(",") if t.strip()]
 
         result.append({
             "id": c["id"],
