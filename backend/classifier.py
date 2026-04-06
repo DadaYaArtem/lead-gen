@@ -30,8 +30,8 @@ INTENT_TYPES = [
 _FALLBACK_KEYWORDS = {
     "interested": ["tell me more", "what services", "sounds interesting", "send me details", "love to learn", "would love"],
     "catchup_thanks": ["thank you", "thanks", "appreciate", "cheers", "kind of you", "glad", "pleasure"],
-    "soft_objection": ["not right now", "we're good", "maybe later", "happy with", "not at the moment", "currently covered"],
-    "hard_rejection": ["don't contact", "remove me", "unsubscribe", "stop messaging", "not interested", "please remove"],
+    "soft_objection": ["no thanks", "not for us", "thanks but", "not right now", "we're good", "maybe later", "happy with", "not at the moment", "currently covered", "not interested", "not looking", "already have", "covered for now"],
+    "hard_rejection": ["don't contact", "remove me from", "unsubscribe", "stop messaging", "stop contacting", "please remove", "never contact", "report as spam", "this is spam"],
     "question": ["what exactly", "where are", "how does", "can you explain", "what is"],
     "redirect": ["talk to", "speak with", "email me at", "you should contact", "reach out to"],
     "ooo": ["out of office", "on vacation", "annual leave", "maternity leave", "will be back", "auto-reply", "automatic reply"],
@@ -126,24 +126,76 @@ async def classify_conversations(conversations: list) -> list:
         return []
 
     prompt = f"""You are a B2B sales assistant classifying LinkedIn conversation intent types.
+You work for Interexy — a software development / staff augmentation company.
+Classify what the CORRESPONDENT (the lead) is communicating in their most recent reply.
 
-INTENT TYPES:
-- interested: "Tell me more", "What services do you offer?", "Sounds interesting, send me details"
-- catchup_thanks: "Thanks!", "Appreciate it", "Kind of you to remember" (replies to congrats/catchup messages)
-- soft_objection: "Not right now", "We're good for now", "Maybe later", "Happy with current setup"
-- hard_rejection: "Please don't contact me", "Remove me from your list"
-- question: "What exactly does Interexy do?", "Where are your developers based?"
-- redirect: "You should talk to our CTO", "Email me at john@company.com"
-- ooo: Out of office auto-replies, vacation messages
-- hiring: "We're actually looking for React developers"
-- competitor: "We do software development ourselves", "We have an in-house team of 50 engineers"
-- neutral: "Ok", "Hmm", emoji-only responses, ambiguous short replies
+=== INTENT DEFINITIONS ===
 
-CONVERSATIONS TO CLASSIFY:
+interested
+  The lead shows genuine curiosity or openness to learning more.
+  Examples: "Tell me more", "What services do you offer?", "Sounds interesting, send me details",
+            "How does it work?", "What's your pricing?", "Can we schedule a call?"
+  Key signal: forward motion — they want MORE information or a next step.
+
+catchup_thanks
+  The lead is responding positively but without business intent — a social reply.
+  Examples: "Thanks!", "Appreciate it!", "Kind of you to reach out", "Good to hear from you",
+            "Hope you're well too", "Thanks for thinking of me"
+  Key signal: warm but non-committal, replying to a congrats/catch-up opener.
+
+soft_objection  ← MOST COMMONLY CONFUSED
+  The lead politely declines but leaves the door open. NO aggression, NO demand to stop contacting.
+  Examples: "No thanks", "Thanks but no thanks", "Not for us right now", "We're good at the moment",
+            "Not interested at this time", "Maybe later", "We're covered", "Happy with our current setup",
+            "Not the right time", "We already have someone for this", "Thanks, but we're not looking"
+  Key signal: polite refusal WITHOUT asking to be removed. The relationship is not damaged.
+  ⚠️ DO NOT confuse with hard_rejection — "no thanks" is SOFT, not hard.
+
+hard_rejection
+  The lead explicitly demands to stop contact or is hostile/aggressive.
+  Examples: "Please remove me from your list", "Don't contact me again", "Stop messaging me",
+            "Unsubscribe", "This is spam", "I've asked you not to contact me", "Report as spam"
+  Key signal: explicit demand to stop, hostility, or threat. The relationship is over.
+  ⚠️ "No thanks" alone is NEVER a hard_rejection — it's a soft_objection.
+
+question
+  The lead asks a specific question about Interexy, its services, process, or team.
+  Examples: "What exactly does Interexy do?", "Where are your developers based?",
+            "What tech stack do you specialize in?", "How many engineers do you have?"
+
+redirect
+  The lead points to a different person or channel.
+  Examples: "You should talk to our CTO", "Email me at john@company.com",
+            "Reach out to our head of engineering", "This isn't my area, try [name]"
+
+ooo
+  Automated out-of-office or vacation reply.
+  Examples: "I'm out of the office until...", "Auto-reply: I'm on leave", "I'll be back on..."
+  Key signal: automated message or explicit absence notice.
+
+hiring
+  The lead indicates they are looking to hire or have open roles.
+  Examples: "We're actually hiring React developers", "We have open positions",
+            "We're looking for senior engineers ourselves"
+
+competitor
+  The lead reveals they are in the same or adjacent business (software dev / staffing).
+  Examples: "We do software development ourselves", "We have an in-house team of 50 engineers",
+            "We're a dev shop too", "Our company builds custom software"
+
+neutral
+  Short, ambiguous, or social reply that doesn't fit any category above.
+  Examples: "Ok", "Sure", "Hmm", "👍", "Got it", "I see"
+
+=== CLASSIFICATION RULES ===
+1. Focus ONLY on what the CORRESPONDENT wrote — ignore ME's messages.
+2. "No thanks" / "Not interested" / "Thanks but not for us" = soft_objection, NOT hard_rejection.
+3. Only use hard_rejection if the lead explicitly demands to stop being contacted.
+4. If the last message is from ME (not CORRESPONDENT), classify based on the full conversation context.
+5. When unsure between two intents, pick the one with lower business risk (e.g. soft_objection over hard_rejection).
+
+=== CONVERSATIONS TO CLASSIFY ===
 {json.dumps(candidates, indent=2)}
-
-For each conversation in the list above, classify the intent based on the recent messages.
-Focus on the CORRESPONDENT's messages (not ME's messages).
 
 Return ONLY valid JSON:
 {{
@@ -152,7 +204,7 @@ Return ONLY valid JSON:
       "index": 0,
       "intent": "one of the 10 intent types",
       "confidence": "high/medium/low",
-      "reasoning": "brief explanation of why this intent was chosen"
+      "reasoning": "1-2 sentences: which signal led to this classification"
     }}
   ]
 }}"""
