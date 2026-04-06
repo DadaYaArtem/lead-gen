@@ -105,6 +105,56 @@ async def _embed_text(text: str, api_key: str) -> List[float]:
         return response.json()["data"][0]["embedding"]
 
 
+async def _normalize_query(query: str, api_key: str) -> str:
+    """Translate and expand a query into English keywords for better embedding.
+
+    Case files are written in English; queries may arrive in Russian or other
+    languages. text-embedding-3-small is multilingual but cross-lingual
+    similarity is significantly weaker than same-language similarity (~0.10
+    vs ~0.45 for the same concept). This function uses gpt-4o-mini to produce
+    a concise English keyword expansion so retrieval works regardless of the
+    query language.
+
+    Returns the original query unchanged if the API call fails.
+    """
+    # Skip if already ASCII (likely English) to avoid unnecessary API call
+    try:
+        query.encode("ascii")
+        return query  # Already ASCII — no translation needed
+    except UnicodeEncodeError:
+        pass  # Contains non-ASCII (e.g. Cyrillic) — normalize
+
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = {
+        "model": "gpt-4o-mini",
+        "max_tokens": 60,
+        "temperature": 0,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Translate the user's query to concise English keywords "
+                    "suitable for semantic search over a software project portfolio. "
+                    "Output only the English keywords, nothing else."
+                ),
+            },
+            {"role": "user", "content": query},
+        ],
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            normalized = response.json()["choices"][0]["message"]["content"].strip()
+            logger.debug(f"Query normalized: '{query}' → '{normalized}'")
+            return normalized
+    except Exception as e:
+        logger.warning(f"Query normalization failed (using original): {e}")
+        return query
+
+
 async def get_embeddings(
     cases: List[Dict[str, Any]], api_key: str
 ) -> Dict[str, List[float]]:
@@ -151,11 +201,22 @@ async def retrieve_cases(
     api_key: str,
     top_k: int = 3,
     threshold: float = 0.35,
+    fallback_floor: float = 0.05,
 ) -> List[Dict[str, Any]]:
     """Find the most relevant case studies for a given query.
 
     Returns a list of case dicts (id, title, content, score), sorted by
     descending similarity. Only cases above `threshold` are returned.
+
+    Fallback: if no case meets `threshold` (e.g. a generic "show me all
+    cases" query or a cross-lingual query after normalization), the top_k
+    results are returned anyway as long as their score exceeds `fallback_floor`.
+    This ensures the user always gets something useful for browsing queries.
+
+    Query normalization: non-ASCII queries (e.g. Russian) are translated to
+    English keywords via gpt-4o-mini before embedding to improve cross-lingual
+    retrieval quality.
+
     Empty placeholder cases are skipped.
     """
     cases = load_cases()
@@ -172,7 +233,8 @@ async def retrieve_cases(
         return []
 
     try:
-        query_vec = await _embed_text(query, api_key)
+        normalized_query = await _normalize_query(query, api_key)
+        query_vec = await _embed_text(normalized_query, api_key)
     except Exception as e:
         logger.error(f"Failed to embed query: {e}")
         return []
@@ -183,11 +245,25 @@ async def retrieve_cases(
         if vec is None:
             continue
         score = _cosine_similarity(query_vec, vec)
-        if score >= threshold:
-            scored.append({**case, "score": round(score, 4)})
+        scored.append({**case, "score": round(score, 4)})
 
     scored.sort(key=lambda x: x["score"], reverse=True)
-    return scored[:top_k]
+
+    # Primary: cases above threshold
+    above_threshold = [c for c in scored if c["score"] >= threshold]
+    if above_threshold:
+        return above_threshold[:top_k]
+
+    # Fallback: return top_k even below threshold (e.g. "show me all cases")
+    fallback = [c for c in scored if c["score"] >= fallback_floor]
+    if fallback:
+        logger.info(
+            f"RAG: no cases above threshold {threshold} — using fallback "
+            f"(top score: {scored[0]['score'] if scored else 'N/A'})"
+        )
+        return fallback[:top_k]
+
+    return []
 
 
 # ─────────────────────────── Metadata (for API listing) ──────────────────────
