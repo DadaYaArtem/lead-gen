@@ -3,6 +3,7 @@ import "@/App.css";
 import axios from "axios";
 import { toast } from "sonner";
 import { Dashboard } from "@/components/Dashboard";
+import { CasesPage } from "@/components/CasesPage";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -17,6 +18,7 @@ function App() {
   const [selectedAccountId, setSelectedAccountId] = useState(null);
   const [leadsFromDb, setLeadsFromDb] = useState([]);
   const [queueStats, setQueueStats] = useState(null);
+  const [currentPage, setCurrentPage] = useState("dashboard"); // "dashboard" | "cases"
   const pollingRef = useRef(null);
 
   // Fetch accounts on mount
@@ -143,21 +145,30 @@ function App() {
   }, [stopPolling]);
 
   return (
-    <div className="min-h-screen bg-[#f8fafc]">
-      <Dashboard
-        isRunning={isRunning}
-        status={status}
-        results={results}
-        leadsFromDb={leadsFromDb}
-        queueStats={queueStats}
-        error={error}
-        onRunAnalysis={runAnalysis}
-        onRetryLeads={retryLeads}
-        jobId={jobId}
-        accounts={accounts}
-        selectedAccountId={selectedAccountId}
-        onAccountChange={setSelectedAccountId}
-      />
+    <div className="h-screen flex flex-col overflow-hidden bg-[#f8fafc]">
+      <div className={currentPage === "cases" ? "shrink-0" : ""}>
+        <Dashboard
+          isRunning={isRunning}
+          status={status}
+          results={results}
+          leadsFromDb={leadsFromDb}
+          queueStats={queueStats}
+          error={error}
+          onRunAnalysis={runAnalysis}
+          onRetryLeads={retryLeads}
+          jobId={jobId}
+          accounts={accounts}
+          selectedAccountId={selectedAccountId}
+          onAccountChange={setSelectedAccountId}
+          currentPage={currentPage}
+          onNavigate={setCurrentPage}
+        />
+      </div>
+      {currentPage === "cases" && (
+        <div className="flex-1 overflow-hidden">
+          <CasesPage />
+        </div>
+      )}
     </div>
   );
 }

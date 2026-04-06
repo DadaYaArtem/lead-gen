@@ -25,6 +25,8 @@ import {
   Clock,
   Trash2,
   Sparkles,
+  BookOpen,
+  LayoutDashboard,
 } from "lucide-react";
 
 const API = process.env.REACT_APP_BACKEND_URL + '/api';
@@ -41,7 +43,9 @@ export function Dashboard({
   jobId, 
   accounts, 
   selectedAccountId, 
-  onAccountChange 
+  onAccountChange,
+  currentPage,
+  onNavigate,
 }) {
   const [selectedLeads, setSelectedLeads] = useState(new Set());
   const [isCleaning, setIsCleaning] = useState(false);
@@ -140,7 +144,7 @@ export function Dashboard({
   return (
     <div className="max-w-7xl mx-auto px-6 py-8">
       {/* Header */}
-      <header className="mb-10" data-testid="app-header">
+      <header className="mb-8" data-testid="app-header">
         <div className="flex items-center justify-between">
           <div>
             <h1
@@ -152,7 +156,7 @@ export function Dashboard({
             <p className="text-sm text-slate-500 mt-1">
               Automated B2B lead analysis &amp; message generation
             </p>
-            {queueStats && (
+            {queueStats && currentPage === "dashboard" && (
               <div className="flex items-center gap-3 mt-2 text-xs">
                 {queueStats.pending > 0 && (
                   <span className="flex items-center gap-1 text-amber-600">
@@ -177,8 +181,38 @@ export function Dashboard({
             HeyReach + OpenAI
           </Badge>
         </div>
-        <div className="h-px bg-slate-200 mt-6" />
+
+        {/* Navigation tabs */}
+        <div className="flex items-center gap-1 mt-6 border-b border-slate-200" data-testid="nav-tabs">
+          <button
+            onClick={() => onNavigate("dashboard")}
+            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium rounded-t-lg border-b-2 transition-colors ${
+              currentPage === "dashboard"
+                ? "border-[#10b981] text-[#1a2744] bg-white"
+                : "border-transparent text-slate-500 hover:text-[#1a2744] hover:bg-slate-50"
+            }`}
+            data-testid="nav-tab-dashboard"
+          >
+            <LayoutDashboard className="h-4 w-4" />
+            Lead Analysis
+          </button>
+          <button
+            onClick={() => onNavigate("cases")}
+            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium rounded-t-lg border-b-2 transition-colors ${
+              currentPage === "cases"
+                ? "border-[#10b981] text-[#1a2744] bg-white"
+                : "border-transparent text-slate-500 hover:text-[#1a2744] hover:bg-slate-50"
+            }`}
+            data-testid="nav-tab-cases"
+          >
+            <BookOpen className="h-4 w-4" />
+            Case Library
+          </button>
+        </div>
       </header>
+
+      {/* Dashboard body — only shown on the "dashboard" page */}
+      {currentPage === "dashboard" && (<>
 
       {/* Action Area */}
       <section className="mb-8" data-testid="action-section">
@@ -417,6 +451,7 @@ export function Dashboard({
           </div>
         </div>
       )}
+      </>)}
     </div>
   );
 }
