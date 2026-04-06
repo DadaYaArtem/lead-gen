@@ -144,9 +144,14 @@ function App() {
     return () => stopPolling();
   }, [stopPolling]);
 
+  const isCasesPage = currentPage === "cases";
+
   return (
-    <div className="h-screen flex flex-col overflow-hidden bg-[#f8fafc]">
-      <div className={currentPage === "cases" ? "shrink-0" : ""}>
+    <div className={isCasesPage
+      ? "h-screen flex flex-col overflow-hidden bg-[#f8fafc]"
+      : "min-h-screen flex flex-col bg-[#f8fafc]"
+    }>
+      <div className={isCasesPage ? "shrink-0" : ""}>
         <Dashboard
           isRunning={isRunning}
           status={status}
@@ -164,7 +169,7 @@ function App() {
           onNavigate={setCurrentPage}
         />
       </div>
-      {currentPage === "cases" && (
+      {isCasesPage && (
         <div className="flex-1 overflow-hidden">
           <CasesPage />
         </div>
