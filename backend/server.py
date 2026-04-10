@@ -799,6 +799,7 @@ async def chat_with_lead(request: ChatRequest):
     db_lead = db_get_lead(request.conversation_id)
     if db_lead:
         analysis = db_lead.get('analysis', {})
+        generated = db_lead.get('messages', {})
         lead_context = {
             'name': db_lead.get('full_name') or request.lead_name,
             'company': db_lead.get('company_name', ''),
@@ -808,6 +809,10 @@ async def chat_with_lead(request: ChatRequest):
             'intent_confidence': db_lead.get('confidence', ''),
             'executive_summary': analysis.get('executive_summary', ''),
             'analysis': analysis,
+            'linkedin_messages': db_lead.get('linkedin_messages', []),
+            'generated_messages': generated.get('messages', []),
+            'recommended_top_3': generated.get('recommended_top_3', []),
+            'strategy_notes': generated.get('notes', ''),
         }
 
     # --- Fallback: in-memory job store ---
@@ -829,6 +834,10 @@ async def chat_with_lead(request: ChatRequest):
                     'intent_confidence': mem_lead.get('intent_confidence', ''),
                     'executive_summary': analysis.get('executive_summary', ''),
                     'analysis': analysis,
+                    'linkedin_messages': [],
+                    'generated_messages': [],
+                    'recommended_top_3': [],
+                    'strategy_notes': '',
                 }
 
     if lead_context is None:

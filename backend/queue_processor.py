@@ -112,9 +112,10 @@ async def queue_processor():
                 if not conversation:
                     raise Exception(f"Could not fetch conversation {conversation_id} from HeyReach")
 
-                # Save lead profile
+                # Save lead profile + raw LinkedIn conversation
                 profile = conversation.get('correspondentProfile', {})
-                lead_id = save_lead(conversation_id, account_id, profile)
+                linkedin_messages = conversation.get('messages', [])
+                lead_id = save_lead(conversation_id, account_id, profile, linkedin_messages)
 
                 # Classify conversation
                 logger.info(f"Classifying conversation {conversation_id}")

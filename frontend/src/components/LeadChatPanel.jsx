@@ -68,13 +68,15 @@ export function LeadChatPanel({ lead, isOpen, onClose }) {
     setIsLoading(true);
 
     try {
+      // Keep last 20 messages to avoid unbounded context growth
+      const messagesPayload = updatedMessages.slice(-20);
       const res = await fetch(`${BACKEND_URL}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           conversation_id: lead.conversation_id,
           lead_name: lead.name,
-          messages: updatedMessages,
+          messages: messagesPayload,
         }),
       });
 

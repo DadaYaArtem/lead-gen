@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from typing import List, Dict, Any, Optional
 
 
@@ -12,11 +13,10 @@ def create_chat_system_prompt(
     full context about the person and company regardless of conversation length.
 
     Args:
-        lead: Lead context dict (name, company, position, intent, analysis, …)
+        lead: Lead context dict (name, company, position, intent, analysis,
+              linkedin_messages, generated_messages, recommended_top_3, …)
         retrieved_cases: Optional list of relevant case studies from the RAG engine.
             Each item has keys: id, title, content, score.
-            When provided, a "Relevant Case Studies" section is appended so the
-            model can reference real Interexy projects when answering.
     """
     name = lead.get('name', 'Unknown')
     company = lead.get('company', 'Unknown')
@@ -29,6 +29,12 @@ def create_chat_system_prompt(
 
     analysis_json = json.dumps(analysis, indent=2, ensure_ascii=False)
 
+    linkedin_section = _build_linkedin_section(lead.get('linkedin_messages', []), name)
+    messages_section = _build_generated_messages_section(
+        lead.get('generated_messages', []),
+        lead.get('recommended_top_3', []),
+        lead.get('strategy_notes', ''),
+    )
     cases_section = _build_cases_section(retrieved_cases)
 
     return f"""You are a B2B sales intelligence assistant for Interexy — a software development company specialising in mobile/web development, AI integration, and digital transformation.
@@ -49,18 +55,81 @@ You have been given detailed research about a specific lead. Help the sales team
 ```json
 {analysis_json}
 ```
-{cases_section}
+{linkedin_section}{messages_section}{cases_section}
 ## Your responsibilities
 - Answer any question about this lead using the research data above.
 - Help craft personalised messages, subject lines, or talking points.
 - Suggest objection-handling strategies specific to this person.
 - Identify the strongest angle for initial or follow-up outreach.
 - Highlight the most relevant pain points and business triggers.
+- When referencing the LinkedIn conversation, quote specific messages to ground your advice.
+- When generated messages exist, critique or improve them on request.
 - When case studies are provided, reference them specifically (by name, outcome, relevance).
 - Be concrete and actionable — avoid generic sales advice.
 
 When you speculate beyond the provided data, always say so explicitly.
 Keep answers concise unless the user asks for detail."""
+
+
+def _build_linkedin_section(messages: List[Dict[str, Any]], lead_name: str) -> str:
+    """Format raw LinkedIn conversation messages into a readable transcript."""
+    if not messages:
+        return ""
+
+    lines = ["\n## LinkedIn Conversation History"]
+    for msg in messages:
+        sender_raw = msg.get('sender', '')
+        sender = "You (Interexy)" if sender_raw == 'ME' else lead_name
+        body = msg.get('body', '').strip()
+        if not body:
+            continue
+        created_at = msg.get('createdAt', '')
+        try:
+            date_obj = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+            date_str = date_obj.strftime('%Y-%m-%d %H:%M')
+        except Exception:
+            date_str = created_at
+        lines.append(f"[{date_str}] **{sender}:** {body}")
+
+    return "\n".join(lines) + "\n"
+
+
+def _build_generated_messages_section(
+    messages: List[Dict[str, Any]],
+    recommended_top_3: List[Any],
+    strategy_notes: str,
+) -> str:
+    """Format AI-generated outreach messages and recommendations."""
+    if not messages and not recommended_top_3:
+        return ""
+
+    lines = ["\n## AI-Generated Outreach Messages"]
+    if strategy_notes:
+        lines.append(f"**Strategy notes:** {strategy_notes}\n")
+
+    if recommended_top_3:
+        lines.append("### Top 3 Recommended Messages")
+        for i, item in enumerate(recommended_top_3[:3], 1):
+            if isinstance(item, dict):
+                title = item.get('title') or item.get('type') or f"Option {i}"
+                body = item.get('message') or item.get('body') or item.get('content') or str(item)
+            else:
+                title = f"Option {i}"
+                body = str(item)
+            lines.append(f"\n**{i}. {title}**\n{body}")
+
+    if messages and not recommended_top_3:
+        lines.append("### All Generated Messages")
+        for i, msg in enumerate(messages, 1):
+            if isinstance(msg, dict):
+                title = msg.get('title') or msg.get('type') or f"Message {i}"
+                body = msg.get('message') or msg.get('body') or msg.get('content') or str(msg)
+            else:
+                title = f"Message {i}"
+                body = str(msg)
+            lines.append(f"\n**{i}. {title}**\n{body}")
+
+    return "\n".join(lines) + "\n"
 
 
 def _build_cases_section(cases: Optional[List[Dict[str, Any]]]) -> str:

@@ -131,6 +131,12 @@ def init_db():
         except Exception:
             pass  # column already exists
 
+        # Add linkedin_messages_json column to lead_profiles if not present
+        try:
+            cursor.execute("ALTER TABLE lead_profiles ADD COLUMN linkedin_messages_json TEXT")
+        except Exception:
+            pass  # column already exists
+
         conn.commit()
         logger.info("Database initialized successfully")
 
@@ -138,26 +144,32 @@ def init_db():
 def save_lead(
     conversation_id: str,
     account_id: int,
-    profile: Dict[str, Any]
+    profile: Dict[str, Any],
+    linkedin_messages: Optional[List[Dict[str, Any]]] = None,
 ) -> int:
-    """Save or update lead information. Returns lead ID."""
+    """Save or update lead information. Returns lead ID.
+
+    linkedin_messages: raw message list from HeyReach conversation
+    (each item has 'sender', 'body', 'createdAt').
+    """
     with get_db_connection() as conn:
         cursor = conn.cursor()
         now = datetime.now(timezone.utc).isoformat()
-        
+        messages_json = json.dumps(linkedin_messages or [])
+
         # Check if lead already exists
         cursor.execute("SELECT id FROM leads WHERE conversation_id = ?", (conversation_id,))
         row = cursor.fetchone()
-        
+
         if row:
             lead_id = row['id']
             cursor.execute("UPDATE leads SET updated_at = ? WHERE id = ?", (now, lead_id))
-            
+
             cursor.execute("""
-                UPDATE lead_profiles 
-                SET first_name = ?, last_name = ?, full_name = ?, 
-                    company_name = ?, position = ?, location = ?, 
-                    profile_url = ?, headline = ?
+                UPDATE lead_profiles
+                SET first_name = ?, last_name = ?, full_name = ?,
+                    company_name = ?, position = ?, location = ?,
+                    profile_url = ?, headline = ?, linkedin_messages_json = ?
                 WHERE lead_id = ?
             """, (
                 profile.get('firstName', ''),
@@ -168,6 +180,7 @@ def save_lead(
                 profile.get('location', ''),
                 profile.get('profileUrl', ''),
                 profile.get('headline', ''),
+                messages_json,
                 lead_id
             ))
         else:
@@ -175,14 +188,14 @@ def save_lead(
                 INSERT INTO leads (conversation_id, account_id, created_at, updated_at)
                 VALUES (?, ?, ?, ?)
             """, (conversation_id, account_id, now, now))
-            
+
             lead_id = cursor.lastrowid
-            
+
             cursor.execute("""
-                INSERT INTO lead_profiles 
-                (lead_id, first_name, last_name, full_name, company_name, 
-                 position, location, profile_url, headline)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO lead_profiles
+                (lead_id, first_name, last_name, full_name, company_name,
+                 position, location, profile_url, headline, linkedin_messages_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 lead_id,
                 profile.get('firstName', ''),
@@ -192,9 +205,10 @@ def save_lead(
                 profile.get('position', ''),
                 profile.get('location', ''),
                 profile.get('profileUrl', ''),
-                profile.get('headline', '')
+                profile.get('headline', ''),
+                messages_json,
             ))
-        
+
         conn.commit()
         return lead_id
 
@@ -456,7 +470,11 @@ def get_lead_by_conversation_id(conversation_id: str) -> Optional[Dict[str, Any]
                 'recommended_top_3': json.loads(msg_row['recommended_top_3_json']),
                 'notes': msg_row['strategy_notes'],
             }
-        
+
+        # Parse stored LinkedIn conversation messages
+        raw_msgs = result.get('linkedin_messages_json')
+        result['linkedin_messages'] = json.loads(raw_msgs) if raw_msgs else []
+
         return result
 
 
