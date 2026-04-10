@@ -23,9 +23,10 @@ if str(ROOT_DIR) not in sys.path:
 load_dotenv(ROOT_DIR / '.env')
 
 from classifier import classify_conversations
-from prompts import create_analysis_prompt, create_catchup_messages_prompt, create_no_thanks_messages_prompt, create_chat_system_prompt
+from prompts import create_analysis_prompt, create_catchup_messages_prompt, create_no_thanks_messages_prompt, create_chat_system_prompt, create_case_chat_system_prompt
 from database import init_db, get_all_leads_for_account, get_lead_by_conversation_id, get_queue_stats
 from webhook_handler import process_webhook_event
+from rag import retrieve_cases, get_cases_metadata
 
 HEYREACH_API_KEY = os.environ.get('HEYREACH_API_KEY')
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
@@ -626,6 +627,21 @@ class RunAnalysisRequest(BaseModel):
     account_id: int
 
 
+@api_router.get("/knowledge-base")
+async def get_knowledge_base():
+    """List all case studies in the knowledge base (metadata only, no embeddings)."""
+    try:
+        cases = get_cases_metadata()
+        return {
+            "cases": cases,
+            "total": len(cases),
+            "populated": sum(1 for c in cases if c["is_populated"]),
+        }
+    except Exception as e:
+        logger.error(f"Error reading knowledge base: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @api_router.post("/run-analysis")
 async def run_analysis(request: RunAnalysisRequest):
     """Start the analysis pipeline"""
@@ -821,7 +837,24 @@ async def chat_with_lead(request: ChatRequest):
             detail=f"Lead '{request.lead_name}' not found in DB or active job"
         )
 
-    system_prompt = create_chat_system_prompt(lead_context)
+    # RAG: retrieve relevant case studies based on the user's last message
+    retrieved_cases = []
+    if OPENAI_API_KEY and request.messages:
+        last_user_msg = next(
+            (m.content for m in reversed(request.messages) if m.role == "user"), ""
+        )
+        if last_user_msg:
+            try:
+                retrieved_cases = await retrieve_cases(last_user_msg, OPENAI_API_KEY)
+                if retrieved_cases:
+                    logger.info(
+                        f"RAG: retrieved {len(retrieved_cases)} case(s) for query "
+                        f"'{last_user_msg[:60]}...' (top score: {retrieved_cases[0]['score']})"
+                    )
+            except Exception as e:
+                logger.warning(f"RAG retrieval failed (non-fatal): {e}")
+
+    system_prompt = create_chat_system_prompt(lead_context, retrieved_cases=retrieved_cases or None)
     messages = [{"role": m.role, "content": m.content} for m in request.messages]
 
     try:
@@ -830,7 +863,52 @@ async def chat_with_lead(request: ChatRequest):
         logger.error(f"Chat error for lead {request.lead_name}: {e}")
         raise HTTPException(status_code=500, detail=f"OpenAI request failed: {str(e)}")
 
-    return {"reply": reply}
+    return {"reply": reply, "retrieved_cases": [{"id": c["id"], "title": c["title"], "score": c["score"]} for c in retrieved_cases]}
+
+
+class CaseChatRequest(BaseModel):
+    messages: List[ChatMessageItem]
+
+
+@api_router.post("/case-chat")
+async def chat_with_cases(request: CaseChatRequest):
+    """Chat with GPT-5.1 (+ web search) about Interexy's case portfolio.
+
+    No lead context is required — this is a standalone case assistant.
+    RAG retrieval is performed on the user's last message to find relevant cases.
+    """
+    retrieved_cases = []
+    if OPENAI_API_KEY and request.messages:
+        last_user_msg = next(
+            (m.content for m in reversed(request.messages) if m.role == "user"), ""
+        )
+        if last_user_msg:
+            try:
+                retrieved_cases = await retrieve_cases(last_user_msg, OPENAI_API_KEY)
+                if retrieved_cases:
+                    logger.info(
+                        f"Case RAG: retrieved {len(retrieved_cases)} case(s) for query "
+                        f"'{last_user_msg[:60]}' (top score: {retrieved_cases[0]['score']:.2f})"
+                    )
+            except Exception as e:
+                logger.warning(f"Case RAG retrieval failed (non-fatal): {e}")
+
+    system_prompt = create_case_chat_system_prompt(retrieved_cases=retrieved_cases or None)
+    messages = [{"role": m.role, "content": m.content} for m in request.messages]
+
+    try:
+        reply = await call_openai_chat(system_prompt, messages, timeout_sec=90)
+    except Exception as e:
+        logger.error(f"Case chat error: {e}")
+        raise HTTPException(status_code=500, detail=f"OpenAI request failed: {str(e)}")
+
+    return {
+        "reply": reply,
+        "retrieved_cases": [
+            {"id": c["id"], "title": c["title"], "score": c["score"]}
+            for c in retrieved_cases
+        ],
+    }
 
 
 app.include_router(api_router)

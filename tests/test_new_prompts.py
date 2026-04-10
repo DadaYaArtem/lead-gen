@@ -274,3 +274,38 @@ class TestCreateChatSystemPrompt:
     def test_contains_interexy_description(self):
         prompt = create_chat_system_prompt(self._make_lead())
         assert "Interexy" in prompt
+
+    # --- RAG: retrieved_cases parameter ---
+
+    def test_no_cases_produces_no_cases_section(self):
+        prompt = create_chat_system_prompt(self._make_lead(), retrieved_cases=None)
+        assert "Case Studies" not in prompt
+
+    def test_empty_cases_list_produces_no_cases_section(self):
+        prompt = create_chat_system_prompt(self._make_lead(), retrieved_cases=[])
+        assert "Case Studies" not in prompt
+
+    def test_retrieved_cases_section_appears(self):
+        cases = [{"id": "rwe_energy", "title": "RWE Energy Project", "content": "Great energy case.", "score": 0.72}]
+        prompt = create_chat_system_prompt(self._make_lead(), retrieved_cases=cases)
+        assert "Relevant Case Studies" in prompt
+        assert "RWE Energy Project" in prompt
+
+    def test_retrieved_cases_content_is_included(self):
+        cases = [{"id": "test_case", "title": "Test Case", "content": "Unique content string xyz987", "score": 0.55}]
+        prompt = create_chat_system_prompt(self._make_lead(), retrieved_cases=cases)
+        assert "Unique content string xyz987" in prompt
+
+    def test_multiple_cases_all_appear(self):
+        cases = [
+            {"id": "case1", "title": "Healthcare Case", "content": "HC content", "score": 0.70},
+            {"id": "case2", "title": "Energy Case", "content": "EN content", "score": 0.45},
+        ]
+        prompt = create_chat_system_prompt(self._make_lead(), retrieved_cases=cases)
+        assert "Healthcare Case" in prompt
+        assert "Energy Case" in prompt
+
+    def test_case_relevance_score_shown(self):
+        cases = [{"id": "c1", "title": "Case One", "content": "content", "score": 0.65}]
+        prompt = create_chat_system_prompt(self._make_lead(), retrieved_cases=cases)
+        assert "65%" in prompt  # score 0.65 → 65%

@@ -64,3 +64,6 @@ out/
 # SQLite database files (runtime, not source)
 backend/leads.db
 *.db
+
+# RAG embeddings cache (auto-generated from OpenAI API — do not commit)
+backend/knowledge_base/embeddings_cache.json

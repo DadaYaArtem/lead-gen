@@ -8,6 +8,7 @@ import {
 } from "@/components/ui/sheet";
 import { toast } from "sonner";
 import { Send, Bot, User, Loader2, Info } from "lucide-react";
+import { MarkdownMessage } from "@/components/MarkdownMessage";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "http://localhost:8000";
 
@@ -193,13 +194,13 @@ function ChatBubble({ message }) {
 
       {/* Bubble */}
       <div
-        className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed whitespace-pre-wrap ${
+        className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed ${
           isUser
-            ? "bg-[#1a2744] text-white rounded-tr-sm"
+            ? "bg-[#1a2744] text-white rounded-tr-sm whitespace-pre-wrap"
             : "bg-slate-100 text-slate-800 rounded-tl-sm"
         }`}
       >
-        {message.content}
+        <MarkdownMessage content={message.content} isUser={isUser} />
       </div>
     </div>
   );
