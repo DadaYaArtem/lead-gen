@@ -103,55 +103,64 @@ async def queue_processor():
             # Mark as processing
             update_queue_status(queue_id, 'processing')
             logger.info(f"Processing conversation {conversation_id} (queue_id={queue_id})")
-            
+
+            completed_ok = False
             try:
                 # Fetch full conversation from HeyReach
                 conversation = await fetch_conversation_from_heyreach(conversation_id, account_id)
-                
+
                 if not conversation:
                     raise Exception(f"Could not fetch conversation {conversation_id} from HeyReach")
-                
+
                 # Save lead profile
                 profile = conversation.get('correspondentProfile', {})
                 lead_id = save_lead(conversation_id, account_id, profile)
-                
+
                 # Classify conversation
                 logger.info(f"Classifying conversation {conversation_id}")
                 classifications = await classify_conversations([conversation])
-                
+
                 if not classifications:
                     raise Exception("No classification result")
-                
+
                 classification = classifications[0]
                 intent = classification['intent']
                 confidence = classification['confidence']
                 reasoning = classification.get('reasoning', '')
-                
+
                 # Save classification
                 save_classification(lead_id, intent, confidence, reasoning)
                 logger.info(f"Classification saved: {intent} (confidence={confidence})")
-                
+
                 # Skip analysis for certain intents
                 if intent in ['ooo', 'competitor']:
                     logger.info(f"Skipping deep analysis for intent={intent}, lead={lead_id}")
                     update_queue_status(queue_id, 'completed')
+                    completed_ok = True
                     continue
-                
+
                 # Process lead: deep analysis + messages
                 success = await process_single_lead(
                     conversation, account_id, lead_id, intent, confidence, reasoning
                 )
-                
+
                 if success:
                     update_queue_status(queue_id, 'completed')
+                    completed_ok = True
                     logger.info(f"Successfully processed conversation {conversation_id}")
                 else:
                     update_queue_status(queue_id, 'error', 'Processing returned False')
-                    
+                    completed_ok = True
+
             except Exception as e:
                 error_msg = str(e)
                 logger.error(f"Error processing queue item {queue_id}: {error_msg}")
                 update_queue_status(queue_id, 'error', error_msg)
+                completed_ok = True
+            finally:
+                # Safety net: if we exit without setting a terminal status, mark as error
+                if not completed_ok:
+                    update_queue_status(queue_id, 'error', 'Unexpected exit during processing')
                 
         except Exception as e:
             logger.error(f"Queue processor error: {e}")

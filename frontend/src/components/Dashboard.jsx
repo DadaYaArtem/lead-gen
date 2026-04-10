@@ -31,19 +31,20 @@ import {
 
 const API = process.env.REACT_APP_BACKEND_URL + '/api';
 
-export function Dashboard({ 
-  isRunning, 
-  status, 
-  results, 
-  leadsFromDb, 
+export function Dashboard({
+  isRunning,
+  status,
+  results,
+  leadsFromDb,
   queueStats,
-  error, 
-  onRunAnalysis, 
-  onRetryLeads, 
-  jobId, 
-  accounts, 
-  selectedAccountId, 
+  error,
+  onRunAnalysis,
+  onRetryLeads,
+  jobId,
+  accounts,
+  selectedAccountId,
   onAccountChange,
+  onLeadsChange,
   currentPage,
   onNavigate,
 }) {
@@ -64,7 +65,7 @@ export function Dashboard({
       if (response.ok) {
         if (data.deleted > 0) {
           toast.success(`Cleaned up ${data.deleted} handled lead${data.deleted > 1 ? 's' : ''}`);
-          setTimeout(() => window.location.reload(), 1000);
+          onLeadsChange();
         } else {
           toast.info("Nothing to clean up — no handled leads found");
         }
@@ -118,8 +119,7 @@ export function Dashboard({
       
       if (response.ok) {
         toast.success(`Lead "${lead.name}" deleted`);
-        // Reload the page to refresh data
-        setTimeout(() => window.location.reload(), 1000);
+        onLeadsChange();
       } else {
         // Handle HTTP errors
         const errorMsg = data?.detail || data?.message || `HTTP ${response.status}`;
@@ -382,7 +382,7 @@ export function Dashboard({
                 </div>
               )}
               <Button
-                onClick={() => window.location.reload()}
+                onClick={onLeadsChange}
                 variant="outline"
                 size="sm"
                 className="h-8"

@@ -27,26 +27,28 @@ function App() {
       const list = res.data.accounts || [];
       setAccounts(list);
       if (list.length === 1) setSelectedAccountId(list[0].id);
-    }).catch((e) => console.error("Failed to fetch accounts:", e));
+    }).catch((e) => {
+      console.error("Failed to fetch accounts:", e);
+      toast.error("Failed to load accounts");
+    });
   }, []);
+
+  const fetchLeads = useCallback(async () => {
+    if (!selectedAccountId) return;
+    try {
+      const res = await axios.get(`${API}/leads/${selectedAccountId}`);
+      const leads = res.data.leads || [];
+      setLeadsFromDb(leads);
+    } catch (e) {
+      console.error("Failed to fetch leads from DB:", e);
+      toast.error("Failed to load leads");
+    }
+  }, [selectedAccountId]);
 
   // Fetch leads from DB when account changes
   useEffect(() => {
-    if (!selectedAccountId) return;
-
-    const fetchLeads = async () => {
-      try {
-        const res = await axios.get(`${API}/leads/${selectedAccountId}`);
-        const leads = res.data.leads || [];
-        setLeadsFromDb(leads);
-        // Don't set results here - leadsFromDb is the source of truth
-      } catch (e) {
-        console.error("Failed to fetch leads from DB:", e);
-      }
-    };
-
     fetchLeads();
-  }, [selectedAccountId]);
+  }, [fetchLeads]);
 
   // Fetch queue stats periodically
   useEffect(() => {
@@ -165,6 +167,7 @@ function App() {
           accounts={accounts}
           selectedAccountId={selectedAccountId}
           onAccountChange={setSelectedAccountId}
+          onLeadsChange={fetchLeads}
           currentPage={currentPage}
           onNavigate={setCurrentPage}
         />

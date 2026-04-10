@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Sheet,
@@ -11,13 +11,39 @@ import { Send, Bot, User, Loader2, Info } from "lucide-react";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "http://localhost:8000";
+const MIN_WIDTH = 380;
+const MAX_WIDTH = Math.min(1100, window.innerWidth - 40);
+const DEFAULT_WIDTH = 680;
 
 export function LeadChatPanel({ lead, isOpen, onClose }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [panelWidth, setPanelWidth] = useState(DEFAULT_WIDTH);
   const bottomRef = useRef(null);
   const inputRef = useRef(null);
+  const dragRef = useRef({ dragging: false, startX: 0, startWidth: 0 });
+
+  const onDragStart = useCallback((e) => {
+    dragRef.current = { dragging: true, startX: e.clientX, startWidth: panelWidth };
+    e.preventDefault();
+  }, [panelWidth]);
+
+  useEffect(() => {
+    const onMouseMove = (e) => {
+      if (!dragRef.current.dragging) return;
+      const delta = dragRef.current.startX - e.clientX;
+      const next = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, dragRef.current.startWidth + delta));
+      setPanelWidth(next);
+    };
+    const onMouseUp = () => { dragRef.current.dragging = false; };
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+  }, []);
 
   // Scroll to bottom whenever messages change
   useEffect(() => {
@@ -81,9 +107,17 @@ export function LeadChatPanel({ lead, isOpen, onClose }) {
     <Sheet open={isOpen} onOpenChange={(open) => !open && onClose()}>
       <SheetContent
         side="right"
-        className="w-full sm:w-[480px] md:w-[520px] flex flex-col p-0 gap-0"
+        className="flex flex-col p-0 gap-0"
+        style={{ width: panelWidth, maxWidth: "none" }}
         data-testid="lead-chat-panel"
       >
+        {/* Drag-resize handle on the left edge */}
+        <div
+          onMouseDown={onDragStart}
+          className="absolute left-0 top-0 h-full w-1.5 cursor-ew-resize z-10 hover:bg-[#10b981]/30 transition-colors"
+          title="Drag to resize"
+        />
+
         {/* Header */}
         <SheetHeader className="px-5 pt-5 pb-4 border-b border-slate-100 shrink-0">
           <SheetTitle className="flex items-center gap-2 text-[#1a2744]">
