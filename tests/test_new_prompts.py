@@ -309,3 +309,16 @@ class TestCreateChatSystemPrompt:
         cases = [{"id": "c1", "title": "Case One", "content": "content", "score": 0.65}]
         prompt = create_chat_system_prompt(self._make_lead(), retrieved_cases=cases)
         assert "65%" in prompt  # score 0.65 → 65%
+
+    def test_lead_replies_must_be_english_only(self):
+        prompt = create_chat_system_prompt(self._make_lead())
+        assert "All outbound messages to leads must be in English only." in prompt
+
+    def test_analysis_language_can_follow_user_language(self):
+        prompt = create_chat_system_prompt(self._make_lead())
+        assert "You may provide analysis and coaching in the user's language." in prompt
+        assert "Any ready-to-send LinkedIn text for the lead must be in English only." in prompt
+
+    def test_no_language_mixing_in_single_variant(self):
+        prompt = create_chat_system_prompt(self._make_lead())
+        assert "Never mix languages within a single outbound message variant." in prompt
