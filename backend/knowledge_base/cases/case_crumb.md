@@ -6,44 +6,80 @@ industry:
 tech_stack:
   - Swift
   - Kotlin
-client_type: startup
-region: DACH
+client_type: company
+region: Europe
 ---
 
 # Crumb
 
 ## Общая информация
 - Клиент: Crumb
-- Локация: Германия
-- Отрасль: Healthcare, Fitness, Wellness
+- Локация: Germany
+- Отрасль: Healthcare, fitness, wellness
 - Формат: Outsource
-- Статус: Запущен, в AppStore
 
 ## Команда
-- Состав: iOS dev, Android dev, QA + delivery
-- Разработка: переписали с нуля на native (Swift)
+- Состав: iOS, Android dev, QA + delivery
 
 ## Стек
-- iOS: Swift
-- Android: Kotlin
+- Swift
+- Kotlin
 
 ## Проблема клиента
-Crumb — фитнес-приложение, поддержанное Interexy с самого начала. Приложение предоставляет пользователям награды в местных бизнесах за различные фитнес-активности, подключаясь к Health App. Продукт мотивирует население быть активнее, делает процесс веселым, персонализированным и удобным. Множество успешных раундов финансирования от правительства Германии.
+Crumb is a revolutionary fitness mobile application that was supported by Interexy from the very beginning.  The app provides users with rewards within local businesses for various fitness activities, connecting to users’ Health App. This way product motivates the population to be more active and makes the process more fun, personalized & convenient. The fitness & wellness focus of the product along with implementation quality led to multiple successful fundraising activities from the government of Germany by the founders of the app.
 
 ## Решение
-Переписали текущую версию с нуля, используя native mobile technologies (Swift). Создали систему геймификации с наградами за спортивную активность.
+Crumb main concept is to make it easier for people worldwide to spend time outside doing sport & fitness activities by providing various rewards, discounts & benefits within local shops & restaurants.
+
+Задачи команды: Rewrite the current version from scratch using native mobile development technologies (Swift)
 
 ## Ключевые фичи
-- Интеграция с Health App (iOS/Android)
-- Награды и скидки в местных магазинах и ресторанах за фитнес-активность
-- Геймификация здорового образа жизни
-- Native mobile development (Swift/Kotlin)
+- The application got to Top 17th of German AppStore Health &
+- Fitness section within 9 weeks after the launch
+- rounding up with
+- 8.000 active users & 300 ratings with 4.7 average rating mark
 
-## Результаты
-- Top 17 в German AppStore Health & Fitness за 9 недель после запуска
-- 8,000 активных пользователей
-- 300 отзывов со средней оценкой 4.7
-- Множественные раунды финансирования от правительства Германии
+
+## О компании клиента (web research)
+Crumb (Crumb UG or GmbH) was founded in **July 2019** in **Hamburg, Germany**, by **Nikolas Bullwinkel**, **Saad Saeed**, and **Stefan Schablowski** ([crunchbase.com]). 
+ Nikolas Bullwinkel serves as **Founder & CPO** ([crunchbase.com]).
+
+ Their core mission is to reward daily movement by offering incentives—from gyms, employers, and brands—to drive sustained physical activity ([crunchbase.com]).
+
+ The employee count is estimated between **1–10**, per Crunchbase and Startbase ([crunchbase.com]). No public revenue figures are available.
+
+ Crumb has undergone two **pre-seed** funding rounds:
+ - **July 16, 2019**, and
+ - **October 15, 2019**, 
+ with investors including **IFB Innovationsstarter** and **NCA** ([crunchbase.com]). 
+ The total funding amounts remain undisclosed.
+
+---
+
+The app provides vouchers from retailers in exchange for physical activity—effectively a rewards-based gamification platform encouraging movement ([crunchbase.com]).
+
+ The core target is B2C—active individuals interested in fitness, and B2B stakeholders like **gyms, employers, and brands**, who provide incentives ([crunchbase.com]).
+
+ There’s no accessible information regarding their pricing or monetization model from public sources. 
+
+---
+
+BuiltWith reports Crumb’s website uses **SPF**, **Euro (currency)** plugin, and **SSL by Default**—12 active web technologies in total ([crunchbase.com]). 
+ No job postings or GitHub activity surfaced to indicate further engineering stack details.
+
+ With a total headcount of 1–10, the engineering team presumably aligns with that range. 
+
+ No open-source repositories, technical blog posts, or public presentations could be located. 
+
+---
+
+No news coverage, press releases, or updates on any of these areas between 2025–2026 could be found. 
+
+---
+
+## Значимость
+- Проект в сфере Healthcare, fitness, wellness
+- Модель работы: Outsource
 
 ## Ссылки
-- AppStore: https://apps.apple.com/de/app/crumb/id1455844646
+- https://apps.apple.com/de/app/crumb/id1455844646
