@@ -293,7 +293,8 @@ async def run_analysis_pipeline(job_id: str, account_id: int):
                 else:
                     logger.info(f"[{job_id}] Creating new lead: {lead_name} (conversation_id={conversation_id})")
                 
-                lead_id = save_lead(conversation_id, account_id, profile)
+                linkedin_messages = conv.get('messages', [])
+                lead_id = save_lead(conversation_id, account_id, profile, linkedin_messages)
 
                 # Save classification
                 save_classification(lead_id, intent, cls['confidence'], cls.get('reasoning', ''))
