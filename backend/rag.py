@@ -158,37 +158,34 @@ async def _embed_text(text: str, api_key: str) -> List[float]:
 
 
 async def _normalize_query(query: str, api_key: str) -> str:
-    """Translate and expand a query into English keywords for better embedding.
+    """Expand a query into rich English keywords for better embedding recall.
 
-    Case files are written in English; queries may arrive in Russian or other
-    languages. text-embedding-3-small is multilingual but cross-lingual
-    similarity is significantly weaker than same-language similarity (~0.10
-    vs ~0.45 for the same concept). This function uses gpt-4o-mini to produce
-    a concise English keyword expansion so retrieval works regardless of the
-    query language.
+    Short or keyword-only queries ("IoT Bluetooth", "AI", "fintech") produce
+    sparse vectors that miss relevant cases even when the cases clearly cover
+    that topic. This function uses gpt-4o-mini to expand every query — both
+    non-English (translate) and English (enrich with synonyms / related terms)
+    — so retrieval quality is consistent regardless of query language or length.
 
     Returns the original query unchanged if the API call fails.
     """
-    # Skip if already ASCII (likely English) to avoid unnecessary API call
-    try:
-        query.encode("ascii")
-        return query  # Already ASCII — no translation needed
-    except UnicodeEncodeError:
-        pass  # Contains non-ASCII (e.g. Cyrillic) — normalize
-
     url = "https://api.openai.com/v1/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {
         "model": "gpt-4o-mini",
-        "max_tokens": 60,
+        "max_tokens": 80,
         "temperature": 0,
         "messages": [
             {
                 "role": "system",
                 "content": (
-                    "Translate the user's query to concise English keywords "
+                    "Expand the user's query into rich English keywords and synonyms "
                     "suitable for semantic search over a software project portfolio. "
-                    "Output only the English keywords, nothing else."
+                    "If the query is not in English, translate it first. "
+                    "Include related technologies, industry terms, and use-case synonyms. "
+                    "Output only the expanded English keywords, nothing else. "
+                    "Example: 'IoT Bluetooth' → "
+                    "'IoT Internet of Things Bluetooth BLE wireless sensors hardware "
+                    "device connectivity embedded smart devices wearables'"
                 ),
             },
             {"role": "user", "content": query},
@@ -200,7 +197,7 @@ async def _normalize_query(query: str, api_key: str) -> str:
             response = await client.post(url, headers=headers, json=payload)
             response.raise_for_status()
             normalized = response.json()["choices"][0]["message"]["content"].strip()
-            logger.debug(f"Query normalized: '{query}' → '{normalized}'")
+            logger.debug(f"Query expanded: '{query}' → '{normalized}'")
             return normalized
     except Exception as e:
         logger.warning(f"Query normalization failed (using original): {e}")
