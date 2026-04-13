@@ -165,24 +165,45 @@ def save_lead(
             lead_id = row['id']
             cursor.execute("UPDATE leads SET updated_at = ? WHERE id = ?", (now, lead_id))
 
-            cursor.execute("""
-                UPDATE lead_profiles
-                SET first_name = ?, last_name = ?, full_name = ?,
-                    company_name = ?, position = ?, location = ?,
-                    profile_url = ?, headline = ?, linkedin_messages_json = ?
-                WHERE lead_id = ?
-            """, (
-                profile.get('firstName', ''),
-                profile.get('lastName', ''),
-                f"{profile.get('firstName', '')} {profile.get('lastName', '')}".strip(),
-                profile.get('companyName', ''),
-                profile.get('position', ''),
-                profile.get('location', ''),
-                profile.get('profileUrl', ''),
-                profile.get('headline', ''),
-                messages_json,
-                lead_id
-            ))
+            # Only overwrite linkedin_messages_json when new data is non-empty,
+            # so a webhook early-save (which has no messages) never wipes real data.
+            if linkedin_messages:
+                cursor.execute("""
+                    UPDATE lead_profiles
+                    SET first_name = ?, last_name = ?, full_name = ?,
+                        company_name = ?, position = ?, location = ?,
+                        profile_url = ?, headline = ?, linkedin_messages_json = ?
+                    WHERE lead_id = ?
+                """, (
+                    profile.get('firstName', ''),
+                    profile.get('lastName', ''),
+                    f"{profile.get('firstName', '')} {profile.get('lastName', '')}".strip(),
+                    profile.get('companyName', ''),
+                    profile.get('position', ''),
+                    profile.get('location', ''),
+                    profile.get('profileUrl', ''),
+                    profile.get('headline', ''),
+                    messages_json,
+                    lead_id
+                ))
+            else:
+                cursor.execute("""
+                    UPDATE lead_profiles
+                    SET first_name = ?, last_name = ?, full_name = ?,
+                        company_name = ?, position = ?, location = ?,
+                        profile_url = ?, headline = ?
+                    WHERE lead_id = ?
+                """, (
+                    profile.get('firstName', ''),
+                    profile.get('lastName', ''),
+                    f"{profile.get('firstName', '')} {profile.get('lastName', '')}".strip(),
+                    profile.get('companyName', ''),
+                    profile.get('position', ''),
+                    profile.get('location', ''),
+                    profile.get('profileUrl', ''),
+                    profile.get('headline', ''),
+                    lead_id
+                ))
         else:
             cursor.execute("""
                 INSERT INTO leads (conversation_id, account_id, created_at, updated_at)

@@ -115,6 +115,7 @@ async def queue_processor():
                 # Save lead profile + raw LinkedIn conversation
                 profile = conversation.get('correspondentProfile', {})
                 linkedin_messages = conversation.get('messages', [])
+                logger.info(f"Saving lead {conversation_id} with {len(linkedin_messages)} LinkedIn messages")
                 lead_id = save_lead(conversation_id, account_id, profile, linkedin_messages)
 
                 # Classify conversation
