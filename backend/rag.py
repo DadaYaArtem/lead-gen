@@ -145,13 +145,24 @@ def _save_cache(cache: Dict[str, Any]) -> None:
     _CACHE_FILE.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
 
 
+def _make_client(timeout: int = 30) -> httpx.AsyncClient:
+    """Create httpx client with proxy support (mirrors server.py _make_client)."""
+    proxy_url = os.environ.get("PROXY_URL")
+    if proxy_url:
+        return httpx.AsyncClient(
+            transport=httpx.AsyncHTTPTransport(proxy=proxy_url),
+            timeout=timeout,
+        )
+    return httpx.AsyncClient(timeout=timeout)
+
+
 async def _embed_text(text: str, api_key: str) -> List[float]:
     """Call OpenAI text-embedding-3-small and return the embedding vector."""
     url = "https://api.openai.com/v1/embeddings"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {"model": "text-embedding-3-small", "input": text}
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with _make_client(timeout=30) as client:
         response = await client.post(url, headers=headers, json=payload)
         response.raise_for_status()
         return response.json()["data"][0]["embedding"]
@@ -193,7 +204,7 @@ async def _normalize_query(query: str, api_key: str) -> str:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with _make_client(timeout=10) as client:
             response = await client.post(url, headers=headers, json=payload)
             response.raise_for_status()
             normalized = response.json()["choices"][0]["message"]["content"].strip()
