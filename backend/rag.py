@@ -251,8 +251,8 @@ async def get_embeddings(
 async def retrieve_cases(
     query: str,
     api_key: str,
-    top_k: int = 3,
-    threshold: float = 0.35,
+    top_k: int = 5,
+    threshold: float = 0.25,
     fallback_floor: float = 0.05,
 ) -> List[Dict[str, Any]]:
     """Find the most relevant case studies for a given query.
