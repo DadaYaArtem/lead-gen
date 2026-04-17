@@ -91,7 +91,10 @@ function App() {
         if (response.data.completed) {
           stopPolling();
           setIsRunning(false);
-          await fetchResults(jid);
+          await Promise.all([
+            fetchResults(jid),
+            fetchLeads(),
+          ]);
         }
       } catch (e) {
         console.error("Polling error:", e);
@@ -100,7 +103,7 @@ function App() {
 
     poll();
     pollingRef.current = setInterval(poll, 3000);
-  }, [stopPolling, fetchResults]);
+  }, [stopPolling, fetchResults, fetchLeads]);
 
   const runAnalysis = useCallback(async () => {
     if (!selectedAccountId) {
