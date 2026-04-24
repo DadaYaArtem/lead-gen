@@ -622,3 +622,32 @@ def get_lead_analysis_time(conversation_id: str) -> Optional[str]:
         """, (conversation_id,))
         row = cursor.fetchone()
         return row['analyzed_at'] if row else None
+
+
+def get_lead_by_account_and_profile_url(account_id: int, profile_url: str) -> Optional[Dict[str, Any]]:
+    """Look up an existing lead by (account_id, profile_url). Used to avoid duplicates and reuse conversation_id."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT l.id, l.conversation_id, l.account_id
+            FROM leads l
+            JOIN lead_profiles lp ON l.id = lp.lead_id
+            WHERE l.account_id = ? AND lp.profile_url = ?
+            LIMIT 1
+        """, (account_id, profile_url))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def get_profile_url_by_conversation_id(conversation_id: str) -> Optional[str]:
+    """Return the profileUrl stored for a conversation, used as a fallback fetch key."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT lp.profile_url
+            FROM lead_profiles lp
+            JOIN leads l ON lp.lead_id = l.id
+            WHERE l.conversation_id = ?
+        """, (conversation_id,))
+        row = cursor.fetchone()
+        return row['profile_url'] if row else None
