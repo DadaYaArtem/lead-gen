@@ -14,9 +14,13 @@ import json
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import Optional
 
+from dotenv import load_dotenv
 import httpx
+
+load_dotenv(Path(__file__).parent / ".env")
 
 logging.basicConfig(
     level=logging.INFO,
