@@ -95,12 +95,9 @@ def get_existing_conversation_ids(account_id: int) -> set:
 async def backfill_account(account_id: int) -> dict:
     logger.info(f"=== Account {account_id} ===")
 
-    # Fetch unseen first, then seen (some replied leads may already be marked seen)
-    unseen = await fetch_all_conversations(account_id, seen=False)
-    seen_convs = await fetch_all_conversations(account_id, seen=True)
-    all_convs = unseen + seen_convs
+    all_convs = await fetch_all_conversations(account_id, seen=False)
 
-    logger.info(f"  Total from HeyReach: {len(all_convs)} (unseen={len(unseen)}, seen={len(seen_convs)})")
+    logger.info(f"  Total unread from HeyReach: {len(all_convs)}")
 
     existing_profile_urls = get_existing_profile_urls(account_id)
     existing_conv_ids = get_existing_conversation_ids(account_id)
