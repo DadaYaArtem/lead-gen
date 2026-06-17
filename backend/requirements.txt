@@ -24,3 +24,7 @@ pytest==9.0.2
 # Linting / formatting (dev)
 flake8==7.3.0
 black==26.1.0
+
+# Google Docs
+gspread==6.2.1
+google-auth==2.47.0

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
 from json_repair import repair_json
+from cover_letter_generator import process_job, append_to_google_sheet, user_profiles
 
 ROOT_DIR = Path(__file__).parent
 # Ensure backend/ is on sys.path so local modules resolve regardless of working directory
@@ -921,6 +922,255 @@ async def chat_with_cases(request: CaseChatRequest):
     }
 
 
+MAX_SESSIONS_PER_USER = 20
+MAX_HISTORY_CHARS = 150000
+
+
+class CreateSessionRequest(BaseModel):
+    user_id: str
+    title: Optional[str] = "New session"
+
+
+class SessionData(BaseModel):
+    id: str
+    title: str
+    messages: List[Dict[str, Any]]
+    saved_state: Optional[Dict[str, Any]] = None
+    last_job_description: Optional[str] = None
+    timestamp: int
+    active: bool = False
+
+
+class GenerateCoverLetterRequest(BaseModel):
+    job_description: str
+    user_id: str
+    session_id: Optional[str] = None
+
+
+
+class ResetSessionRequest(BaseModel):
+    user_id: str  # обязательное поле
+
+
+class SaveCoverLetterRequest(BaseModel):
+    job_description: str
+    profile_name: str
+    cover_letter: str
+    screening_answers: str = ""
+    user_id: str
+    session_id: str
+
+
+user_sessions: Dict[str, Dict[str, Any]] = {}
+
+
+def _get_user_sessions(user_id: str) -> List[dict]:
+    if user_id not in user_sessions:
+        user_sessions[user_id] = {"sessions": [], "current_session_id": None}
+    return user_sessions[user_id]["sessions"]
+
+def _trim_history(history: List[dict]) -> List[dict]:
+    total = sum(len(msg.get("content", "")) for msg in history)
+    if total <= MAX_HISTORY_CHARS:
+        return history
+    new_history = []
+    current = 0
+    for msg in reversed(history):
+        current += len(msg.get("content", ""))
+        if current > MAX_HISTORY_CHARS:
+            break
+        new_history.append(msg)
+    return list(reversed(new_history))
+
+
+@api_router.post("/sessions/create")
+async def create_session(request: CreateSessionRequest):
+    user_id = request.user_id
+    sessions = _get_user_sessions(user_id)
+    if len(sessions) >= MAX_SESSIONS_PER_USER:
+        sessions.sort(key=lambda x: x.get("timestamp", 0))
+        sessions.pop(0)
+    new_session = {
+        "id": str(uuid.uuid4()),
+        "title": request.title or "New session",
+        "messages": [],
+        "saved_state": None,
+        "last_job_description": None,
+        "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
+        "active": False,
+    }
+    sessions.append(new_session)
+    user_sessions[user_id]["current_session_id"] = new_session["id"]
+    return {"session_id": new_session["id"], "session": new_session}
+
+@api_router.get("/sessions/{user_id}")
+async def list_sessions(user_id: str):
+    sessions = _get_user_sessions(user_id)
+    result = []
+    for s in sessions:
+        result.append({
+            "id": s["id"],
+            "title": s["title"],
+            "timestamp": s["timestamp"],
+            "active": s.get("active", False),
+            "message_count": len(s.get("messages", [])),
+        })
+    return {"sessions": result}
+
+@api_router.get("/sessions/{user_id}/{session_id}")
+async def get_session(user_id: str, session_id: str):
+    sessions = _get_user_sessions(user_id)
+    for s in sessions:
+        if s["id"] == session_id:
+            s["active"] = True
+            user_sessions[user_id]["current_session_id"] = session_id
+            return {
+                "session": {
+                    "id": s["id"],
+                    "title": s["title"],
+                    "messages": s.get("messages", []),
+                    "saved_state": s.get("saved_state"),
+                    "last_job_description": s.get("last_job_description"),
+                    "timestamp": s["timestamp"],
+                }
+            }
+    raise HTTPException(status_code=404, detail="Session not found")
+
+@api_router.delete("/sessions/{user_id}/{session_id}")
+async def delete_session(user_id: str, session_id: str):
+    sessions = _get_user_sessions(user_id)
+    initial_len = len(sessions)
+    sessions[:] = [s for s in sessions if s["id"] != session_id]
+    if len(sessions) == initial_len:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if user_sessions[user_id].get("current_session_id") == session_id:
+        user_sessions[user_id]["current_session_id"] = None
+    return {"status": "deleted"}
+
+
+
+@api_router.post("/save-cover-letter")
+async def save_cover_letter(request: SaveCoverLetterRequest):
+    user_id = request.user_id
+    session_id = request.session_id
+
+    sessions = _get_user_sessions(user_id)
+    target_session = None
+    for s in sessions:
+        if s["id"] == session_id:
+            target_session = s
+            break
+    if not target_session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Вызываем существующую функцию append_to_google_sheet
+    append_to_google_sheet(
+        request.job_description,
+        request.profile_name,
+        request.cover_letter,
+        request.screening_answers
+    )
+
+    # Помечаем сессию как сохранённую
+    target_session["saved"] = True
+    return {"status": "saved", "session_id": session_id}
+
+
+@api_router.post("/generate-cover-letter")
+async def generate_cover_letter(request: GenerateCoverLetterRequest):
+    user_id = request.user_id
+    session_id = request.session_id
+
+    if not session_id:
+        # Создаём новую сессию
+        create_req = CreateSessionRequest(user_id=user_id, title=request.job_description[:30])
+        new_session = await create_session(create_req)
+        session_id = new_session["session_id"]
+
+    sessions = _get_user_sessions(user_id)
+    current_session = None
+    for s in sessions:
+        if s["id"] == session_id:
+            current_session = s
+            break
+    if not current_session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    conversation_history = current_session.get("messages", [])
+    saved_state = current_session.get("saved_state")
+
+    try:
+        result, new_saved_state = await process_job(
+            job_description=request.job_description,
+            conversation_history=conversation_history,
+            saved_state=saved_state
+        )
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+
+        # Обновляем сессию
+        current_session["messages"].append({"role": "user", "content": request.job_description})
+        assistant_msg = {
+            "role": "assistant",
+            "content": "Generated cover letters",
+            "result": result
+        }
+        current_session["messages"].append(assistant_msg)
+        current_session["messages"] = _trim_history(current_session["messages"])
+        current_session["saved_state"] = new_saved_state
+        current_session["last_job_description"] = request.job_description
+        current_session["timestamp"] = int(datetime.now(timezone.utc).timestamp() * 1000)
+        if current_session["title"] == "New session" and len(current_session["messages"]) > 0:
+            current_session["title"] = request.job_description[:30]
+
+        return {
+            "result": result,
+            "saved_state": new_saved_state,
+            "session_id": session_id
+        }
+    except Exception as e:
+        logger.error(f"Error generating cover letter for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@api_router.post("/reset-session")
+async def reset_session(request: ResetSessionRequest):
+    user_id = request.user_id
+    if user_id in user_sessions:
+        user_sessions[user_id] = {"sessions": [], "current_session_id": None}
+    return {"status": "reset", "user_id": user_id}
+
+
+@api_router.get("/profiles")
+async def get_profiles():
+    """
+    Возвращает список доступных профилей с их основными данными.
+    """
+    profiles = [
+        {
+            "name": p["name"],
+            "position": p["position"],
+            "min_salary_per_hour_usd": p.get("min_salary_per_hour_usd"),
+            "portfolio_link": p.get("portfolio_link"),
+            "priority_cases": p.get("priority_cases", [])
+        }
+        for p in user_profiles
+    ]
+    return {"profiles": profiles}
+
+
+@api_router.get("/session/{user_id}")
+async def get_session(user_id: str):
+    if user_id not in user_sessions:
+        return {"history": [], "saved_state": None}
+    session = user_sessions[user_id]
+    return {
+        "history": session["history"],
+        "saved_state": session["saved_state"],
+        "last_job_description": session["last_job_description"]
+    }
+
+
 app.include_router(api_router)
 
 app.add_middleware(
@@ -930,3 +1180,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)

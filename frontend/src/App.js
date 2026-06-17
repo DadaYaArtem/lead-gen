@@ -4,6 +4,7 @@ import axios from "axios";
 import { toast } from "sonner";
 import { Dashboard } from "@/components/Dashboard";
 import { CasesPage } from "@/components/CasesPage";
+import { CoverLetterGenerator } from "@/components/CoverLetterGenerator";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -18,7 +19,7 @@ function App() {
   const [selectedAccountId, setSelectedAccountId] = useState(null);
   const [leadsFromDb, setLeadsFromDb] = useState([]);
   const [queueStats, setQueueStats] = useState(null);
-  const [currentPage, setCurrentPage] = useState("dashboard"); // "dashboard" | "cases"
+  const [currentPage, setCurrentPage] = useState("dashboard"); // "dashboard" | "cases" | "cover-letter"
   const pollingRef = useRef(null);
 
   // Fetch accounts on mount
@@ -152,32 +153,25 @@ function App() {
   const isCasesPage = currentPage === "cases";
 
   return (
-    <div className={isCasesPage
+    <div className={currentPage === "cases" || currentPage === "cover-letter"
       ? "h-screen flex flex-col overflow-hidden bg-[#f8fafc]"
       : "min-h-screen flex flex-col bg-[#f8fafc]"
     }>
-      <div className={isCasesPage ? "shrink-0" : ""}>
+      <div className="shrink-0">
         <Dashboard
-          isRunning={isRunning}
-          status={status}
-          results={results}
-          leadsFromDb={leadsFromDb}
-          queueStats={queueStats}
-          error={error}
-          onRunAnalysis={runAnalysis}
-          onRetryLeads={retryLeads}
-          jobId={jobId}
-          accounts={accounts}
-          selectedAccountId={selectedAccountId}
-          onAccountChange={setSelectedAccountId}
-          onLeadsChange={fetchLeads}
+          // все пропсы как раньше
           currentPage={currentPage}
           onNavigate={setCurrentPage}
         />
       </div>
-      {isCasesPage && (
+      {currentPage === "cases" && (
         <div className="flex-1 overflow-hidden">
           <CasesPage />
+        </div>
+      )}
+      {currentPage === "cover-letter" && (
+        <div className="flex-1 overflow-hidden">
+          <CoverLetterGenerator />
         </div>
       )}
     </div>
