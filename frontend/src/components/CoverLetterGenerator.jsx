@@ -9,7 +9,6 @@ import {
   Loader2,
   Send,
   Save,
-  Trash2,
   AlertCircle,
   FileText,
   User,
@@ -25,6 +24,7 @@ const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "http://localhost:8000"
 const API = `${BACKEND_URL}/api`;
 
 const MAX_SESSIONS = 20;
+const STATUS_POLL_INTERVAL = 3000;
 
 function getUserId() {
   let id = localStorage.getItem("coverLetterUserId");
@@ -41,54 +41,53 @@ export function CoverLetterGenerator() {
   const [currentSessionId, setCurrentSessionId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [savedState, setSavedState] = useState(null);
-  const [isSaved, setIsSaved] = useState(false);
+  const [savedProfiles, setSavedProfiles] = useState(new Set());
+  const [isGenerating, setIsGenerating] = useState(false);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingSessions, setIsLoadingSessions] = useState(false);
+  const [isCreatingSession, setIsCreatingSession] = useState(false);
   const bottomRef = useRef(null);
   const inputRef = useRef(null);
+  const statusPollInterval = useRef(null);
 
-  // Загрузка списка сессий с сервера
-  const loadSessions = useCallback(async () => {
-    setIsLoadingSessions(true);
-    try {
-      const res = await axios.get(`${API}/sessions/${userId}`);
-      // Сортировка по timestamp (новые сверху)
-      const sessionsData = (res.data.sessions || []).sort((a, b) => b.timestamp - a.timestamp);
-      setSessions(sessionsData);
-      if (sessionsData.length > 0 && !currentSessionId) {
-        const active = sessionsData.find(s => s.active);
-        const target = active || sessionsData[0];
-        await loadSession(target.id);
-      } else if (sessionsData.length === 0) {
-        await createNewSession();
-      }
-    } catch (e) {
-      console.error("Failed to load sessions:", e);
-      toast.error("Failed to load sessions");
-    } finally {
-      setIsLoadingSessions(false);
-    }
-  }, [userId]);
+  const currentSessionIdRef = useRef(currentSessionId);
+  useEffect(() => {
+    currentSessionIdRef.current = currentSessionId;
+  }, [currentSessionId]);
 
-  // Загрузка конкретной сессии
+  // -------------------------------------------------------------------------
+  // Load a single session from the server and update all local state
+  // -------------------------------------------------------------------------
   const loadSession = useCallback(async (sessionId) => {
     try {
       const res = await axios.get(`${API}/sessions/${userId}/${sessionId}`);
       const session = res.data.session;
       setCurrentSessionId(sessionId);
+      currentSessionIdRef.current = sessionId;
       setMessages(session.messages || []);
       setSavedState(session.saved_state || null);
-      setIsSaved(session.saved || false);
-      // Обновить список сессий, чтобы отметить активную и обновить метаданные
-      setSessions(prev => prev.map(s => ({
-        ...s,
-        active: s.id === sessionId,
-        saved: s.id === sessionId ? session.saved : s.saved,
-        message_count: session.messages ? session.messages.length : 0,
-      })));
+      const alreadySaved = Object.keys(session.profile_rows || {});
+      setSavedProfiles(new Set(alreadySaved));
+      setIsGenerating(session.is_generating || false);
+      setSessions(prev => prev.map(s => {
+        if (s.id === sessionId) {
+          return {
+            ...s,
+            active: true,
+            saved: session.saved || false,
+            message_count: session.messages ? session.messages.length : 0,
+            messages: session.messages || [],
+            saved_state: session.saved_state || null,
+            pass_count: session.pass_count || 0,
+            is_generating: session.is_generating || false,
+            title: session.title || s.title,
+          };
+        }
+        return { ...s, active: false };
+      }));
       setInput("");
-      // Прокрутка вниз после загрузки
+      localStorage.setItem("coverLetterCurrentSessionId", sessionId);
       setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
     } catch (e) {
       console.error("Failed to load session:", e);
@@ -96,84 +95,283 @@ export function CoverLetterGenerator() {
     }
   }, [userId]);
 
-  // Загрузка сессий при монтировании
-  useEffect(() => {
-    loadSessions();
-  }, []);
-
-  // Прокрутка вниз при изменении сообщений
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, isLoading]);
-
-  // Создание новой сессии
+  // -------------------------------------------------------------------------
+  // Create a new session on the server and switch to it
+  // -------------------------------------------------------------------------
   const createNewSession = useCallback(async () => {
+    if (isCreatingSession) return null;
+    setIsCreatingSession(true);
     try {
       const res = await axios.post(`${API}/sessions/create`, {
         user_id: userId,
         title: "New session",
       });
       const newSession = res.data.session;
+      const sessionId = newSession.id || res.data.session_id;
       setSessions(prev => {
         let updated = prev.map(s => ({ ...s, active: false }));
         if (updated.length >= MAX_SESSIONS) {
-          const sorted = [...updated].sort((a, b) => a.timestamp - b.timestamp);
-          sorted.shift();
+          const sorted = [...updated].sort((a, b) => b.timestamp - a.timestamp);
+          sorted.pop();
           updated = sorted;
         }
-        return [...updated, { ...newSession, active: true, saved: false, message_count: 0 }];
+        return [{
+          ...newSession,
+          id: sessionId,
+          active: true,
+          saved: false,
+          message_count: 0,
+          messages: [],
+          saved_state: null,
+          pass_count: 0,
+          is_generating: false,
+        }, ...updated];
       });
-      setCurrentSessionId(newSession.id);
+      setCurrentSessionId(sessionId);
+      currentSessionIdRef.current = sessionId;
+      localStorage.setItem("coverLetterCurrentSessionId", sessionId);
       setMessages([]);
       setSavedState(null);
-      setIsSaved(false);
+      setSavedProfiles(new Set());
+      setIsGenerating(false);
       setInput("");
       toast.info("New session created");
+      return sessionId;
     } catch (e) {
       console.error("Failed to create session:", e);
       toast.error("Failed to create session");
+      return null;
+    } finally {
+      setIsCreatingSession(false);
+    }
+  }, [userId, isCreatingSession]);
+
+  // -------------------------------------------------------------------------
+  // Poll generation status for the currently-active session
+  // -------------------------------------------------------------------------
+  const pollGenerationStatus = useCallback(async () => {
+    const sessionId = currentSessionIdRef.current;
+    if (!sessionId) return;
+    try {
+      const res = await axios.get(`${API}/sessions/${userId}/${sessionId}/status`);
+      const { is_generating, messages_count, pass_count, saved, has_result } = res.data;
+      setSessions(prev => prev.map(s =>
+        s.id === sessionId
+          ? { ...s, is_generating, pass_count, saved, message_count: messages_count }
+          : s
+      ));
+      setIsGenerating(is_generating);
+      if (!is_generating && has_result && messages_count > 0) {
+        // Load fresh session data
+        const sessionData = await axios.get(`${API}/sessions/${userId}/${sessionId}`);
+        const session = sessionData.data.session;
+        setCurrentSessionId(sessionId);
+        currentSessionIdRef.current = sessionId;
+        setMessages(session.messages || []);
+        setSavedState(session.saved_state || null);
+        setSavedProfiles(new Set(Object.keys(session.profile_rows || {})));
+        setIsGenerating(session.is_generating || false);
+        setSessions(prev => prev.map(s => {
+          if (s.id === sessionId) {
+            return {
+              ...s,
+              active: true,
+              saved: session.saved || false,
+              message_count: session.messages ? session.messages.length : 0,
+              messages: session.messages || [],
+              saved_state: session.saved_state || null,
+              pass_count: session.pass_count || 0,
+              is_generating: session.is_generating || false,
+              title: session.title || s.title,
+            };
+          }
+          return { ...s, active: false };
+        }));
+
+        const lastAssistant = [...(session.messages || [])].reverse().find(m => m.role === "assistant");
+        if (lastAssistant?.error) {
+          toast.error("Model returned an invalid response format");
+        } else {
+          toast.success("Cover letters generated");
+        }
+
+        setIsLoading(false);
+        if (statusPollInterval.current) {
+          clearInterval(statusPollInterval.current);
+          statusPollInterval.current = null;
+        }
+      }
+    } catch (e) {
+      console.error("Status poll error:", e);
     }
   }, [userId]);
 
-  // Переключение на сессию
-  const switchSession = useCallback((sessionId) => {
-    loadSession(sessionId);
-  }, [loadSession]);
+  // -------------------------------------------------------------------------
+  // Load all sessions for this user on mount
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    let cancelled = false;
 
-  // Удаление сессии
+    const init = async () => {
+      setIsLoadingSessions(true);
+      try {
+        const res = await axios.get(`${API}/sessions/${userId}`);
+        if (cancelled) return;
+
+        const sessionsData = (res.data.sessions || []).sort((a, b) => b.timestamp - a.timestamp);
+        setSessions(sessionsData.map(s => ({
+          ...s,
+          messages: s.messages || [],
+          saved_state: s.saved_state || null,
+          pass_count: s.pass_count || 0,
+          is_generating: s.is_generating || false,
+        })));
+
+        if (sessionsData.length === 0) {
+          // No sessions – show empty state, do NOT auto-create
+          setCurrentSessionId(null);
+          currentSessionIdRef.current = null;
+          setMessages([]);
+          setSavedState(null);
+          setSavedProfiles(new Set());
+          setIsGenerating(false);
+          localStorage.removeItem("coverLetterCurrentSessionId");
+          return;
+        }
+
+        const savedSessionId = localStorage.getItem("coverLetterCurrentSessionId");
+        const target = savedSessionId
+          ? sessionsData.find(s => s.id === savedSessionId)
+          : null;
+        const toLoad = target || sessionsData.find(s => s.active) || sessionsData[0];
+        await loadSession(toLoad.id);
+      } catch (e) {
+        console.error("Failed to load sessions:", e);
+        toast.error("Failed to load sessions");
+      } finally {
+        if (!cancelled) setIsLoadingSessions(false);
+      }
+    };
+
+    init();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId]);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, isLoading]);
+
+  useEffect(() => {
+    return () => {
+      if (statusPollInterval.current) {
+        clearInterval(statusPollInterval.current);
+        statusPollInterval.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (isGenerating && currentSessionId) {
+      if (statusPollInterval.current) clearInterval(statusPollInterval.current);
+      pollGenerationStatus();
+      statusPollInterval.current = setInterval(pollGenerationStatus, STATUS_POLL_INTERVAL);
+    } else {
+      if (statusPollInterval.current) {
+        clearInterval(statusPollInterval.current);
+        statusPollInterval.current = null;
+      }
+    }
+    return () => {
+      if (statusPollInterval.current) {
+        clearInterval(statusPollInterval.current);
+        statusPollInterval.current = null;
+      }
+    };
+  }, [isGenerating, currentSessionId, pollGenerationStatus]);
+
+  // -------------------------------------------------------------------------
+  // Switch to an already-loaded session (prefer local state, fall back to API)
+  // -------------------------------------------------------------------------
+  const switchSession = useCallback((sessionId) => {
+    const session = sessions.find(s => s.id === sessionId);
+    if (session && Array.isArray(session.messages)) {
+      setCurrentSessionId(sessionId);
+      currentSessionIdRef.current = sessionId;
+      localStorage.setItem("coverLetterCurrentSessionId", sessionId);
+      setMessages(session.messages || []);
+      setSavedState(session.saved_state || null);
+      setSavedProfiles(new Set(Object.keys(session.profile_rows || {})));
+      setIsGenerating(session.is_generating || false);
+      setSessions(prev => prev.map(s => ({ ...s, active: s.id === sessionId })));
+      setInput("");
+      setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
+    } else {
+      loadSession(sessionId);
+    }
+  }, [sessions, loadSession]);
+
+  // -------------------------------------------------------------------------
+  // Delete a session
+  // -------------------------------------------------------------------------
   const deleteSession = useCallback(async (sessionId, e) => {
     e?.stopPropagation();
     if (!window.confirm("Delete this session?")) return;
     try {
       await axios.delete(`${API}/sessions/${userId}/${sessionId}`);
-      setSessions(prev => prev.filter(s => s.id !== sessionId));
-      if (currentSessionId === sessionId) {
+
+      // Update local sessions list
+      setSessions(prev => {
+        const remaining = prev.filter(s => s.id !== sessionId);
+        return remaining;
+      });
+
+      // If the deleted session was the current one, switch or reset
+      if (currentSessionIdRef.current === sessionId) {
+        localStorage.removeItem("coverLetterCurrentSessionId");
+        // Find the next session to activate
         const remaining = sessions.filter(s => s.id !== sessionId);
         if (remaining.length > 0) {
-          await loadSession(remaining[0].id);
+          // Switch to the first remaining session (most recent)
+          const nextSession = remaining[0];
+          setCurrentSessionId(nextSession.id);
+          currentSessionIdRef.current = nextSession.id;
+          localStorage.setItem("coverLetterCurrentSessionId", nextSession.id);
+          setMessages(nextSession.messages || []);
+          setSavedState(nextSession.saved_state || null);
+          setSavedProfiles(new Set(Object.keys(nextSession.profile_rows || {})));
+          setIsGenerating(nextSession.is_generating || false);
+          setSessions(prev => prev.map(s => ({ ...s, active: s.id === nextSession.id })));
+          setInput("");
+          setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
         } else {
+          // No sessions left – reset to empty state
           setCurrentSessionId(null);
+          currentSessionIdRef.current = null;
           setMessages([]);
           setSavedState(null);
-          setIsSaved(false);
-          await createNewSession();
+          setSavedProfiles(new Set());
+          setIsGenerating(false);
+          setInput("");
         }
       }
+      toast.info("Session deleted");
     } catch (e) {
       console.error("Failed to delete session:", e);
       toast.error("Failed to delete session");
     }
-  }, [userId, currentSessionId, sessions, loadSession, createNewSession]);
+  }, [userId, sessions]);
 
-  // Отправка сообщения
+  // -------------------------------------------------------------------------
+  // Send a message / trigger generation
+  // -------------------------------------------------------------------------
   const sendMessage = async () => {
     const text = input.trim();
-    if (!text || isLoading) return;
+    if (!text || isLoading || isLoadingSessions || isCreatingSession) return;
 
-    let sessionId = currentSessionId;
+    let sessionId = currentSessionIdRef.current;
     if (!sessionId) {
-      await createNewSession();
-      sessionId = currentSessionId;
+      sessionId = await createNewSession();
       if (!sessionId) {
         toast.error("Failed to create session");
         return;
@@ -181,42 +379,38 @@ export function CoverLetterGenerator() {
     }
 
     const userMsg = { role: "user", content: text };
-    const updatedMessages = [...messages, userMsg];
-    setMessages(updatedMessages);
+    const prevMessages = messages;
+    setMessages(prev => [...prev, userMsg]);
     setInput("");
     setIsLoading(true);
+    setIsGenerating(true);
 
     try {
-      const payload = {
+      await axios.post(`${API}/generate-cover-letter`, {
         job_description: text,
         user_id: userId,
         session_id: sessionId,
-      };
-
-      const res = await axios.post(`${API}/generate-cover-letter`, payload);
-      const data = res.data;
-      const result = data.result;
-      const newSavedState = data.saved_state;
-
-      // Перезагружаем сессию, чтобы обновить сообщения и состояние
-      await loadSession(sessionId);
-      toast.success("Cover letters generated");
+      });
     } catch (e) {
-      const msg = e.response?.data?.detail || e.message || "Generation failed";
-      toast.error(msg);
-      setMessages(messages);
+      const errMsg = e.response?.data?.detail || e.message || "Generation failed";
+      toast.error(errMsg);
+      setMessages([
+        ...prevMessages,
+        { role: "assistant", content: errMsg, error: errMsg },
+      ]);
       setInput(text);
-    } finally {
       setIsLoading(false);
-      setTimeout(() => inputRef.current?.focus(), 50);
+      setIsGenerating(false);
+      if (statusPollInterval.current) {
+        clearInterval(statusPollInterval.current);
+        statusPollInterval.current = null;
+      }
     }
   };
 
-  // Сброс сессии (создание новой)
-  const handleReset = async () => {
-    await createNewSession();
-  };
-
+  // -------------------------------------------------------------------------
+  // Save to Google Sheets
+  // -------------------------------------------------------------------------
   const handleSave = async (profileName, profileData) => {
     const jobEval = profileData.job_evaluation || {};
     if (jobEval.decision !== "PASS") {
@@ -243,10 +437,12 @@ export function CoverLetterGenerator() {
         cover_letter: fullLetter,
         screening_answers: profileData.screening_answers || "",
         user_id: userId,
-        session_id: currentSessionId,
+        session_id: currentSessionIdRef.current,
       });
-      setIsSaved(true);
-      setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, saved: true } : s));
+      setSavedProfiles(prev => new Set([...prev, profileName]));
+      setSessions(prev => prev.map(s =>
+        s.id === currentSessionIdRef.current ? { ...s, saved: true } : s
+      ));
       toast.success(`Saved ${profileName} to Google Sheets`);
     } catch (e) {
       const msg = e.response?.data?.detail || e.message || "Save failed";
@@ -254,12 +450,15 @@ export function CoverLetterGenerator() {
     }
   };
 
-  // Рендер карточки профиля – используется внутри renderAssistantMessage
-  const renderProfileCard = (name, data, isLast, isSaved) => {
+  // -------------------------------------------------------------------------
+  // Render helpers
+  // -------------------------------------------------------------------------
+  const renderProfileCard = (name, data, isLast, isSavedFlag) => {
     const jobEval = data.job_evaluation || {};
     const letterParts = data.letter_parts || {};
     const screening = data.screening_answers || "";
     const isPass = jobEval.decision === "PASS";
+    const selectedCases = data.selected_cases || [];
 
     return (
       <Card key={name} className="border-slate-200 shadow-sm overflow-hidden">
@@ -290,19 +489,21 @@ export function CoverLetterGenerator() {
         <CardContent className="space-y-3">
           {isPass && (
             <>
-              {data.selected_cases && data.selected_cases.length > 0 && (
+              {selectedCases.length > 0 && (
                 <div>
-                  <p className="text-xs font-medium text-slate-500">Selected Cases</p>
+                  <p className="text-xs font-medium text-slate-500">Selected cases for {name}:</p>
                   <ul className="mt-1 space-y-1">
-                    {data.selected_cases.map((c, i) => (
-                      <li key={i} className="text-xs text-slate-700">
-                        <span className="font-medium">{c.name}</span>
+                    {selectedCases.map((c) => (
+                      <li key={c.case_id} className="text-xs text-slate-700">
+                        <span className="font-medium text-emerald-600">{c.name}</span>
                         {c.link && (
                           <a href={c.link} target="_blank" rel="noopener noreferrer" className="ml-1 text-[#10b981] hover:underline">
                             (link)
                           </a>
                         )}
-                        <span className="block text-slate-500 text-[11px]">{c.reasoning}</span>
+                        <span className="block text-[10px] text-slate-500 ml-1">
+                          Reason: {c.reasoning}
+                        </span>
                       </li>
                     ))}
                   </ul>
@@ -332,7 +533,7 @@ export function CoverLetterGenerator() {
                   </div>
                 </div>
               )}
-              {isLast && !isSaved && (
+              {isLast && !isSavedFlag && (
                 <Button
                   onClick={() => handleSave(name, data)}
                   size="sm"
@@ -351,15 +552,81 @@ export function CoverLetterGenerator() {
   };
 
   const renderAssistantMessage = (msg) => {
+    if (msg.error) {
+      return (
+        <div className="flex items-start gap-2 text-red-300">
+          <AlertCircle className="h-4 w-4 mt-0.5 shrink-0 text-red-400" />
+          <div>
+            <p className="text-xs font-semibold text-red-400 mb-0.5">Generation failed</p>
+            <p className="text-xs whitespace-pre-wrap">{String(msg.error)}</p>
+          </div>
+        </div>
+      );
+    }
+
     if (!msg.result) return <p>{msg.content}</p>;
+
     const results = msg.result;
+
+    if (typeof results !== "object" || Array.isArray(results)) {
+      return (
+        <div className="flex items-start gap-2 text-red-300">
+          <AlertCircle className="h-4 w-4 mt-0.5 shrink-0 text-red-400" />
+          <p className="text-xs">Unexpected response format from the model.</p>
+        </div>
+      );
+    }
+
+    if (typeof results.__error__ === "string") {
+      return (
+        <div className="flex items-start gap-2 text-red-300">
+          <AlertCircle className="h-4 w-4 mt-0.5 shrink-0 text-red-400" />
+          <div>
+            <p className="text-xs font-semibold text-red-400 mb-0.5">Model returned an invalid response</p>
+            <p className="text-xs whitespace-pre-wrap">{results.__error__}</p>
+          </div>
+        </div>
+      );
+    }
+
+    const allCases = msg.all_cases || [];
     const hasPass = Object.values(results).some(d => d.job_evaluation?.decision === "PASS");
     const isLast = messages.indexOf(msg) === messages.length - 1;
 
+    let passCount = 0;
+    let totalCount = 0;
+    for (const [, data] of Object.entries(results)) {
+      totalCount++;
+      if (data.job_evaluation?.decision === "PASS") passCount++;
+    }
+
     return (
       <div className="space-y-4">
+        <div className="bg-gray-800 p-2 rounded-lg text-white text-sm font-medium">
+          Профилей с PASS: {passCount} из {totalCount}
+          {savedProfiles.size > 0 && ` (сохранено: ${[...savedProfiles].join(", ")})`}
+        </div>
+
+        {allCases.length > 0 && (
+          <div className="bg-gray-800 p-3 rounded-lg">
+            <p className="text-xs font-medium text-gray-300">Potential cases (RAG) for this job:</p>
+            <ul className="mt-1 space-y-1">
+              {allCases.map((c) => (
+                <li key={c.id} className="text-xs text-white">
+                  <span className="font-medium">{c.name || c.id}</span>
+                  {c.link && (
+                    <a href={c.link} target="_blank" rel="noopener noreferrer" className="ml-1 text-emerald-400 hover:underline">
+                      (link)
+                    </a>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         {Object.entries(results).map(([name, data]) =>
-          renderProfileCard(name, data, isLast, isSaved)
+          renderProfileCard(name, data, isLast, savedProfiles.has(name))
         )}
         {!hasPass && (
           <div className="text-center py-4">
@@ -371,30 +638,10 @@ export function CoverLetterGenerator() {
     );
   };
 
-  // Текущая сессия для отображения в заголовке
   const currentSession = sessions.find(s => s.id === currentSessionId);
 
-  // Получение количества PASS из последнего сообщения модели
-  const getPassCount = (msgs) => {
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      const msg = msgs[i];
-      if (msg.role === "assistant" && msg.result) {
-        const results = msg.result;
-        let passCount = 0;
-        for (const [name, data] of Object.entries(results)) {
-          if (data.job_evaluation?.decision === "PASS") passCount++;
-        }
-        return passCount;
-      }
-    }
-    return 0;
-  };
-
-  const passCount = getPassCount(messages);
-
   return (
-    <div className="flex h-full bg-[#f8fafc]" data-testid="cover-letter-page">
-      {/* Sidebar со списком сессий */}
+    <div className="flex flex-1 w-full bg-[#f8fafc]" data-testid="cover-letter-page">
       <aside className="w-64 shrink-0 border-r border-slate-200 bg-white flex flex-col">
         <div className="px-3 py-3 border-b border-slate-100 flex items-center justify-between">
           <h2 className="text-sm font-semibold text-[#1a2744] flex items-center gap-2">
@@ -407,7 +654,7 @@ export function CoverLetterGenerator() {
             variant="ghost"
             className="h-7 w-7 p-0 text-slate-500 hover:text-[#10b981]"
             title="New session"
-            disabled={isLoadingSessions}
+            disabled={isLoadingSessions || isCreatingSession}
           >
             <Plus className="h-4 w-4" />
           </Button>
@@ -421,19 +668,6 @@ export function CoverLetterGenerator() {
             <p className="text-xs text-slate-400 text-center py-4">No sessions yet</p>
           ) : (
             sessions.map((s) => {
-              // Статус: количество PASS в последнем ответе модели
-              let passCount = 0;
-              const msgs = s.messages || [];
-              for (let i = msgs.length - 1; i >= 0; i--) {
-                const msg = msgs[i];
-                if (msg.role === "assistant" && msg.result) {
-                  const results = msg.result;
-                  for (const [name, data] of Object.entries(results)) {
-                    if (data.job_evaluation?.decision === "PASS") passCount++;
-                  }
-                  break;
-                }
-              }
               const saved = s.saved || false;
               return (
                 <div
@@ -450,7 +684,7 @@ export function CoverLetterGenerator() {
                       {s.title || "New session"}
                     </p>
                     <div className="flex items-center gap-2 text-[10px] text-slate-400">
-                      <span>{passCount} PASS</span>
+                      <span>{s.pass_count || 0} PASS</span>
                       <span>·</span>
                       {saved ? (
                         <span className="flex items-center gap-0.5 text-emerald-600">
@@ -481,9 +715,7 @@ export function CoverLetterGenerator() {
         </div>
       </aside>
 
-      {/* Основная область чата */}
-      <main className="flex-1 flex flex-col overflow-hidden">
-        {/* Заголовок с информацией о текущей сессии */}
+      <main className="flex-1 flex flex-col overflow-hidden min-h-0">
         <div className="px-4 py-2 border-b border-slate-200 bg-white shrink-0 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <MessageSquare className="h-4 w-4 text-[#10b981]" />
@@ -493,12 +725,16 @@ export function CoverLetterGenerator() {
             <Badge variant="outline" className="text-[10px] font-mono">
               {userId.slice(0, 6)}…
             </Badge>
+            {isGenerating && (
+              <Badge variant="outline" className="bg-amber-100 text-amber-700 border-amber-300 text-[10px] animate-pulse">
+                Generating…
+              </Badge>
+            )}
           </div>
         </div>
 
-        {/* Сообщения */}
         <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4" data-testid="cover-letter-chat-messages">
-          {messages.length === 0 && !isLoading && (
+          {messages.length === 0 && !isLoading && !isGenerating && (
             <EmptyState onSuggest={(text) => { setInput(text); inputRef.current?.focus(); }} />
           )}
 
@@ -527,7 +763,6 @@ export function CoverLetterGenerator() {
           <div ref={bottomRef} />
         </div>
 
-        {/* Поле ввода */}
         <div className="px-4 pb-4 pt-2 border-t border-slate-200 bg-white shrink-0">
           <div className="flex items-end gap-2">
             <textarea
@@ -543,12 +778,18 @@ export function CoverLetterGenerator() {
               placeholder="Paste job description here… (Shift+Enter for new line)"
               rows={3}
               className="flex-1 resize-none rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-[#10b981]/40 focus:border-[#10b981] transition-colors"
-              disabled={isLoading}
+              disabled={isLoading || isLoadingSessions}
               data-testid="cover-letter-input"
             />
             <Button
               onClick={sendMessage}
-              disabled={!input.trim() || isLoading || !currentSessionId}
+              disabled={
+                !input.trim() ||
+                isLoading ||
+                isLoadingSessions ||
+                isCreatingSession ||
+                !currentSessionIdRef.current
+              }
               size="icon"
               className="h-11 w-11 shrink-0 rounded-xl bg-[#10b981] hover:bg-[#0d9469] text-white disabled:opacity-40"
               data-testid="cover-letter-send-button"
@@ -569,7 +810,6 @@ export function CoverLetterGenerator() {
   );
 }
 
-// Компонент ChatBubble – стили поменяны местами
 function ChatBubble({ message, renderAssistant }) {
   const isUser = message.role === "user";
   return (
@@ -606,7 +846,6 @@ function ChatBubble({ message, renderAssistant }) {
   );
 }
 
-// EmptyState и SuggestionChip без изменений
 function EmptyState({ onSuggest }) {
   const suggestions = [
     "Agentic AI Developer for Tele-health Company (HIPAA - Ongoing Hourly)",

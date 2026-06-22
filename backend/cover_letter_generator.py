@@ -11,6 +11,10 @@ import sys
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
+import logging
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 ROOT_DIR = Path(__file__).parent.parent
 if str(ROOT_DIR) not in sys.path:
@@ -28,6 +32,7 @@ if not OPENAI_API_KEY:
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 MAX_HOURS_PER_WEEKS = 40
+MIN_DURATION_MONTHS = 2
 
 # ----------------------------------------------------------------------
 # 1. Профили пользователей (полные данные)
@@ -434,256 +439,544 @@ def fix_newlines(text: str) -> str:
     return text
 
 
+def _expect_str(val, path: str) -> None:
+    """Raise TypeError if val is not a plain string."""
+    if not isinstance(val, str):
+        raise TypeError(
+            f"Field '{path}' must be a string, got {type(val).__name__}: {repr(val)[:80]}"
+        )
+
+
+def _expect_str_or_none(val, path: str) -> None:
+    if val is not None:
+        _expect_str(val, path)
+
+
+def _validate_profile_data(name: str, data: dict) -> None:
+    """
+    Validate the shape of one candidate block in the model response.
+    Raises TypeError with a descriptive message on the first violation found.
+    """
+    if not isinstance(data, dict):
+        raise TypeError(
+            f"Profile '{name}': expected object, got {type(data).__name__}"
+        )
+
+    # ---- Проверка наличия всех обязательных полей верхнего уровня ----
+    required_top_keys = ("job_evaluation", "selected_cases", "hook_options", "selected_hook", "letter_parts", "screening_answers")
+    for key in required_top_keys:
+        if key not in data:
+            raise TypeError(f"Profile '{name}': missing required key '{key}'")
+
+    # ---- job_evaluation ----
+    je = data["job_evaluation"]
+    if not isinstance(je, dict):
+        raise TypeError(f"Profile '{name}'.job_evaluation must be an object")
+    required_je_keys = ("decision", "reasoning", "observations")
+    for key in required_je_keys:
+        if key not in je:
+            raise TypeError(f"Profile '{name}'.job_evaluation missing required key '{key}'")
+    decision = je["decision"]
+    if not isinstance(decision, str) or decision not in ("PASS", "SKIP"):
+        raise TypeError(
+            f"Profile '{name}'.job_evaluation.decision must be 'PASS' or 'SKIP', got {repr(decision)}"
+        )
+    reasoning = je["reasoning"]
+    if not isinstance(reasoning, str) or not reasoning.strip():
+        raise TypeError(
+            f"Profile '{name}'.job_evaluation.reasoning must be a non-empty string"
+        )
+    observations = je["observations"]
+    if not isinstance(observations, list):
+        raise TypeError(f"Profile '{name}'.job_evaluation.observations must be a list")
+    for i, obs in enumerate(observations):
+        if not isinstance(obs, dict):
+            raise TypeError(f"Profile '{name}'.job_evaluation.observations[{i}] must be an object")
+        if "type" not in obs or "reasoning" not in obs:
+            raise TypeError(f"Profile '{name}'.job_evaluation.observations[{i}] missing 'type' or 'reasoning'")
+        obs_type = obs["type"]
+        if not isinstance(obs_type, str) or not obs_type.strip():
+            raise TypeError(
+                f"Profile '{name}'.job_evaluation.observations[{i}].type must be a non-empty string"
+            )
+        obs_reason = obs["reasoning"]
+        if not isinstance(obs_reason, str) or not obs_reason.strip():
+            raise TypeError(
+                f"Profile '{name}'.job_evaluation.observations[{i}].reasoning must be a non-empty string"
+            )
+
+    # ---- selected_cases ----
+    cases = data["selected_cases"]
+    if not isinstance(cases, list):
+        raise TypeError(f"Profile '{name}'.selected_cases must be a list")
+    if len(cases) != 2:
+        raise TypeError(
+            f"Profile '{name}'.selected_cases must contain exactly 2 cases, got {len(cases)}"
+        )
+    for i, c in enumerate(cases):
+        if not isinstance(c, dict):
+            raise TypeError(f"Profile '{name}'.selected_cases[{i}] must be an object")
+        required_case_keys = ("case_id", "name", "link", "reasoning")
+        for key in required_case_keys:
+            if key not in c:
+                raise TypeError(f"Profile '{name}'.selected_cases[{i}] missing required key '{key}'")
+        case_id = c["case_id"]
+        if not isinstance(case_id, str) or not case_id.strip():
+            raise TypeError(
+                f"Profile '{name}'.selected_cases[{i}].case_id must be a non-empty string"
+            )
+        c_name = c["name"]
+        if not isinstance(c_name, str) or not c_name.strip():
+            raise TypeError(
+                f"Profile '{name}'.selected_cases[{i}].name must be a non-empty string"
+            )
+        link = c["link"]
+        if not isinstance(link, str):
+            raise TypeError(f"Profile '{name}'.selected_cases[{i}].link must be a string")
+        reasoning = c["reasoning"]
+        if not isinstance(reasoning, str) or not reasoning.strip():
+            raise TypeError(
+                f"Profile '{name}'.selected_cases[{i}].reasoning must be a non-empty string"
+            )
+
+    # ---- hook_options ----
+    hooks = data["hook_options"]
+    if not isinstance(hooks, list):
+        raise TypeError(f"Profile '{name}'.hook_options must be a list")
+    for i, h in enumerate(hooks):
+        if not isinstance(h, dict):
+            raise TypeError(f"Profile '{name}'.hook_options[{i}] must be an object")
+        if "text" not in h:
+            raise TypeError(f"Profile '{name}'.hook_options[{i}] missing required key 'text'")
+        text = h["text"]
+        if not isinstance(text, str) or not text.strip():
+            raise TypeError(
+                f"Profile '{name}'.hook_options[{i}].text must be a non-empty string"
+            )
+
+    # ---- selected_hook ----
+    selected_hook = data["selected_hook"]
+    if not isinstance(selected_hook, str) or not selected_hook.strip():
+        raise TypeError(
+            f"Profile '{name}'.selected_hook must be a non-empty string"
+        )
+
+    # ---- letter_parts ----
+    lp = data["letter_parts"]
+    if not isinstance(lp, dict):
+        raise TypeError(f"Profile '{name}'.letter_parts must be an object")
+    required_parts = ("hook", "bridge", "case1_text", "case2_text", "closing", "cta", "signature")
+    for part in required_parts:
+        if part not in lp:
+            raise TypeError(f"Profile '{name}'.letter_parts missing required key '{part}'")
+        val = lp[part]
+        if not isinstance(val, str) or not val.strip():
+            raise TypeError(
+                f"Profile '{name}'.letter_parts.{part} must be a non-empty string"
+            )
+
+    # ---- screening_answers ----
+    answers = data["screening_answers"]
+    if not isinstance(answers, str):
+        raise TypeError(f"Profile '{name}'.screening_answers must be a string")
+    # screening_answers может быть пустой строкой — это допустимо
+
+import re
+
+
+def _normalize(s: str) -> str:
+    """
+    Convert any case identifier to a canonical lowercase-alphanum form so that
+    'Scale AI', 'case_scale_ai', 'case_scale_ai.md', and 'ScaleAI' all map to
+    the same key: 'scaleai'.
+
+    Steps:
+      1. Strip the leading 'case_' prefix (file-slug convention).
+      2. Strip a trailing '.md' extension if present.
+      3. Lowercase everything.
+      4. Remove all non-alphanumeric characters (spaces, underscores, hyphens, etc.).
+    """
+    s = s.strip()
+    # Remove leading 'case_' prefix (case-insensitive)
+    s = re.sub(r'^case[_\-]', '', s, flags=re.IGNORECASE)
+    # Remove trailing file extension
+    s = re.sub(r'\.\w+$', '', s)
+    # Lowercase and strip non-alphanumeric
+    return re.sub(r'[^a-z0-9]', '', s.lower())
+
+
+def build_cases_text(best_cases_with_content: list, profiles_to_use: list) -> str:
+    """
+    Build the cases section injected into the prompt.
+
+    Ownership is resolved by normalising both the case ID/name from the
+    retrieved list and the entries in each candidate's priority_cases to a
+    common slug, then matching them. This handles the mismatch between
+    human-readable names ("Scale AI") and file-slug IDs ("case_scale_ai").
+    """
+    # Build normalised_key -> list[candidate_name]
+    # For each candidate, normalise every entry in priority_cases.
+    norm_to_candidates: dict[str, list[str]] = {}
+    for profile in profiles_to_use:
+        for entry in profile.get("priority_cases", []):
+            key = _normalize(entry)
+            norm_to_candidates.setdefault(key, []).append(profile["name"])
+
+    def eligible_for_case(case: dict) -> list[str]:
+        """Return candidate names that own this case."""
+        # Try matching against both the id field and the name field, taking
+        # whichever produces a hit (some cases use slugs as id, others use
+        # human-readable names).
+        for field in ("id", "name"):
+            key = _normalize(case.get(field, ""))
+            if key and key in norm_to_candidates:
+                return norm_to_candidates[key]
+        return []
+
+    # ── Index table ──────────────────────────────────────────────────────────
+    index_lines = [
+        "### Available cases",
+        "",
+        "Index (scan this first to find which cases each candidate may use):",
+        "",
+        f"{'Case ID':<28} {'Name':<32} Eligible candidates",
+        "-" * 90,
+    ]
+    for case in best_cases_with_content:
+        cid = case.get("id", "")
+        name = case.get("name", "Unknown")[:30]
+        eligible = eligible_for_case(case)
+        index_lines.append(
+            f"{cid:<28} {name:<32} {', '.join(eligible) if eligible else '(none)'}"
+        )
+    index_lines.append("")
+
+    # ── Full case blocks ─────────────────────────────────────────────────────
+    block_lines = ["Full case details:", ""]
+    for case in best_cases_with_content:
+        cid = case.get("id", "")
+        name = case.get("name", "Unknown")
+        link = case.get("link") or ""
+        content = (case.get("content") or "")[:3000].strip()
+        eligible = eligible_for_case(case)
+
+        block_lines += [
+            f"=== CASE {cid} ===",
+            f"Name:                {name}",
+            f"Link:                {link if link and link != 'N/A' else '(no external link)'}",
+            f"Eligible candidates: {', '.join(eligible) if eligible else '(none in current profile set)'}",
+            "Content:",
+            content,
+            "",
+        ]
+
+    return "\n".join(index_lines) + "\n" + "\n".join(block_lines)
+
+
 async def generate_initial_response(
-    job_description: str,
-    best_cases_with_content: list,
-    user_profiles: list,
-    selection_rules: dict,
-    cover_letter_rules: str,
-    letter_template: str,
-    api_key: str,
-    allowed_profiles: list = None,
-    forbidden_case_ids: list = None
+        job_description: str,
+        best_cases_with_content: list,
+        user_profiles: list,
+        selection_rules: dict,
+        cover_letter_rules: str,
+        letter_template: str,
+        api_key: str,
+        allowed_profiles: list = None,
+        forbidden_case_ids: list = None
 ) -> dict:
-    """
-    Генерирует ответ для первого запроса (без истории).
-    Формирует полный промпт с кейсами, правилами, профилями.
-    """
     client_local = AsyncOpenAI(api_key=api_key)
     profiles_to_use = [p for p in user_profiles if allowed_profiles is None or p["name"] in allowed_profiles]
 
     main_part = f"""
-    ### Cover letter writing rules (shortened)
+### Cover letter writing rules
+ 
+**Letter structure (blocks):**
+1. **Hook** – 1-2 conversational sentences addressing a specific technical risk or business pain from the job description. Never start with "Most...".
+2. **Bridge** – one sentence connecting the hook to the solution, must name at least one concrete technology or method.
+3. **Case 1** – name and link on the same line, then 1-2 lines: what was built, stack used, key result with metric.
+4. **Case 2** – same format.
+5. **Closing** – years of experience, core stack match, availability ({MAX_HOURS_PER_WEEKS}), hourly rate (if hourly), "available to start immediately" if urgent.
+6. **CTA** – one natural call-to-action sentence.
+7. **Signature** – "Best, [Name]" (+ Portfolio link if stated in user profile).
+ 
+**Formatting:** Use only hyphen-minus " - " (not em dash or en dash). No bold, no bullet points, no headers. Letter length 150-200 words. Screening answers as a separate block after the signature.
+ 
+---
+ 
+### Step 0 – Job Analysis (semantic extraction)
+ 
+Read the job description carefully word by word. Extract the following fields **only if the job description explicitly states them** — do not infer or assume:
+ 
+- `required_skills` – skills listed under "Mandatory", "Required", "Must have", or explicitly stated as requirements.
+- `core_technical_terms` – specialized terms verbatim from the text (e.g., "RAG", "knowledge graph", "multi-agent").
+- `business_pain_points` – specific problems the client describes (quote or closely paraphrase).
+- `screening_questions` – any questions the client asks applicants to answer (copy them verbatim).
+- `budget` – min, max, currency, type (hourly/fixed). Only if a number is stated.
+- `weekly_hours` – required hours per week. Only if a number is stated.
+- `minimum_duration_months` - minimum job offer duration in months measurement.
+ 
+**Observations — read every sentence for these triggers:**
+ 
+An observation is a dict: `{{"type": "<type_string>", "reasoning": "<one sentence quoting or referencing the exact phrase that triggered this>"}}`.
+ 
+Go through each observation type below and ask: "Does the job description contain this?" If yes, add it. If no, omit it. Never add an observation that is not triggered by explicit text.
+ 
+| Type | Trigger condition |
+|---|---|
+| `loom_required` | Client says "record a Loom", "send a video", "include a short video", or similar — but does NOT say the video must be in the proposal itself |
+| `loom_mandatory_in_proposal` | Client explicitly says the video must be attached to or included in the proposal (RED FLAG) |
+| `urgent_start` | Client says "start immediately", "start ASAP", "available to start within X days", "need someone now", or similar urgency phrasing |
+| `project_based` | Job described as "project-based", "one-off", "fixed scope", "milestone-based", or has a defined end date |
+| `part_time` | Client states fewer than 30 hours/week, or uses the phrase "part-time" |
+| `nda_required` | Client mentions NDA, non-disclosure agreement, or confidentiality agreement |
+| `test_task_paid` | Client asks for a test task AND states it is paid |
+| `test_task_unpaid` | Client asks for a test task AND does not mention payment (assume unpaid) |
+| `screen_recorded_assessment` | Client requires a screen-recorded technical assessment (RED FLAG) |
+| `geo_restriction` | Client restricts applicants by country, timezone beyond UTC±4, or residency (RED FLAG) |
+| `niche_stack` | Client requires a highly specific technology that none of the candidate profiles contain (RED FLAG) |
+| `no_job_details` | Job description is empty, fewer than 3 sentences, or contains no technical requirements (RED FLAG) |
+ 
+**Red flags** = any of: `loom_mandatory_in_proposal`, `screen_recorded_assessment`, `geo_restriction`, `niche_stack`, `no_job_details`.
+If ANY red flag is present → every candidate gets decision = SKIP. Do not evaluate further.
+ 
+---
+ 
+### Step 1 – Candidate Evaluation (strict decision tree, apply per candidate)
+ 
+Evaluate each candidate independently using this exact sequence. Stop at the first matching rule.
+ 
+**Rule 1 — Red flag (global)**
+If Step 0 found any red flag observation → SKIP. Reasoning: state which red flag.
+ 
+**Rule 2 — Budget hard block**
+If `budget.max` was extracted AND `candidate.min_salary_per_hour_usd > budget.max` → SKIP.
+Reasoning: state the numbers.
+ 
+**Rule 3 — Hours hard block**
+If `minimum_duration` was extracted AND `minimum_duration < {2}` → SKIP.
+Reasoning: state the numbers.
 
-    **Letter structure (blocks):**
-    1. **Hook** – 1‑2 conversational sentences addressing a specific technical risk or business pain from the job description. Never start with "Most...".
-    2. **Bridge** – one sentence connecting the hook to the solution, must name at least one concrete technology or method.
-    3. **Case 1** – name and link on the same line, then 1‑2 lines: what was built, stack used, key result with metric.
-    4. **Case 2** – same format.
-    5. **Closing** – years of experience, core stack match, availability ({MAX_HOURS_PER_WEEKS}), hourly rate (if hourly), "available to start immediately" if urgent.
-    6. **CTA** – "Let's talk."
-    7. **Signature** – "Best, [Name]" (+ Portfolio link if stated in user profile).
+**Rule 4 — Minimal Duration hard block**
+If `minimum_duration_months` was extracted AND `minimum_duration_months < {MIN_DURATION_MONTHS}` → SKIP.
+Reasoning: state the numbers.
+ 
+**Rule 5 — Complete field mismatch**
+The candidate's primary domain (e.g., mobile development, embedded systems, data science) has zero overlap with the job's domain AND the candidate has none of the required skills → SKIP.
+This rule requires BOTH conditions. If the candidate has even one relevant skill or adjacent experience, do NOT apply this rule.
+ 
+**Rule 6 — Weak fit (PASS with flag)**
+The candidate's domain overlaps with the job OR the candidate has at least one relevant skill from the required list, BUT there are notable gaps (missing 2+ key required skills, or primary stack differs significantly) → PASS, and add a `weak_fit` observation.
+`weak_fit` reasoning must list: which required skills are missing, and why the candidate still passes (what overlap exists).
+ 
+**Rule 7 — Default PASS**
+None of the above rules triggered → PASS.
+ 
+**Key principle:** When in doubt between PASS and SKIP, prefer PASS with a `weak_fit` observation. A cover letter with caveats is more useful than silently skipping a borderline candidate.
+ 
+---
+ 
+### Step 2 – Case Selection (per candidate, PASS only)
+ 
+You are given a list of cases with IDs, names, links, and full descriptions. Each case belongs to specific candidates as indicated by `priority_cases` in the candidate profile.
+ 
+**Selection rules (apply in order):**
+1. If provided cases are stated in the list of the priority cases of a candidate choose these cases in the first place.
+2. From the eligible cases, select exactly 2 whose content best matches the job's `required_skills` and `core_technical_terms`.
+3. If fewer than 2 eligible cases exist for this candidate → select all available (even 0 or 1), and note this in `selected_cases` reasoning.
+4. Never reference a case that was not provided in the cases list below. Never invent a case name, link, or metric. Do not choose the priority cases if they are not provided by RAG system.
+5. When writing `case1_text` and `case2_text` in `letter_parts`, use ONLY facts, technologies, and metrics that appear verbatim in the provided case content. Do not embellish or infer additional details.
+ 
+**Case content reference:** Each case below has an ID. When you select a case, copy its `case_id` exactly into `selected_cases[].case_id`. The letter text for that case must be derived solely from that case's provided content.
+ 
+---
+ 
+### Step 3 – Cover Letter Generation (per candidate, PASS only)
+ 
+- Use `selected_hook` as Block 1 (hook).
+- Weave 3-5 required skills into case descriptions or closing — only skills present in the candidate's profile or demonstrated in the selected cases.
+- Follow letter structure exactly.
+- Use `\\n` for line breaks inside JSON strings.
+ 
+**Observations → letter rules (check each one):**
+- `loom_required` present → add exactly this phrase somewhere in the letter body: "I'll record a Loom as requested." Do not describe what the Loom will contain.
+- `urgent_start` present → closing must include "available to start immediately" or "can start within [X] days".
+- `nda_required` present → closing must mention willingness to sign NDA.
+- `test_task_unpaid` present → screening answers must state test tasks are completed on a paid basis only.
+ 
+**Uniqueness rules (each candidate's letter must be distinct):**
+- Rotate hook angle across candidates: technical risk / missed revenue / slow time-to-market / scalability bottleneck / UX gap / cost inefficiency / security concern / team velocity.
+- Bridge: vary sentence structure (start with technology / start with problem / start with outcome). Never reuse a bridging phrase.
+- Cases: highlight different aspects even if candidates share projects. One focuses on latency, another on accuracy; one cites "40% load time drop", another cites "10k concurrent users".
+- Closing: vary skill order and phrasing. Avoid the rigid "X years full-stack. Tech A, B, C. Rate $Z" pattern.
+- CTA: rotate naturally — "Let's talk.", "Open to a quick call?", "I'd love to discuss how I can help.", "When works for you?"
+- Never copy a full phrase from one candidate's letter to another's.
+ 
+**Prohibited:** Do not mention any skill, technology, or achievement that is not in the candidate's `skills` list or explicitly described in a selected case's provided content.
+ 
+**Case text format:**
+[Case name] [link if valid external URL, else omit]
+[One sentence: what was built + stack. One sentence: key result with a specific metric.]
+ 
+Example:
+Arcade - https://arcade.ai
+Developed an AI-powered marketplace with real-time recommendation engine using Python, FastAPI, and PostgreSQL. Reduced page load time by 40% and increased user engagement by 25%.
 
-    **Formatting:** Use only hyphen-minus " - " (not em dash or en dash). No bold, no bullet points, no headers. Letter length 150‑200 words. Screening answers as a separate block after the signature.
-
-    **Case selection:** 
-    - Use ONLY from the provided case list. Never invent cases. Select **exactly 2 most relevant** cases for the candidate, taking into account both the job requirements **and the candidate's own skills and past projects**. 
-    - **Candidate‑centric selection:** Prefer cases that are listed in the candidate's `priority_cases` (if provided). Do not assign a case to a candidate if the candidate had no role in that case (i.e., cases are not shared across different candidates unless explicitly indicated). 
-    - If the candidate has no relevant cases (or none of the cases match their profile).
     ---
-
-    ### Step 0 – Job Analysis (semantic extraction)
-
-    Extract the following **only if explicitly stated** in the job description text (do not infer):
-
-    - `required_skills` – all skills from "Mandatory skills" section or explicitly mentioned.
-    - `core_technical_terms` – specialized terms (e.g., "RAG", "knowledge graph", "multi-agent").
-    - `business_pain_points` – specific client problems (e.g., "existing tools don't scale").
-    - `screening_questions` – explicit questions (e.g., "Walk us through...").
-    - `budget` – min, max, type (hourly/fixed).
-    - `weekly_hours` – required hours per week (if given).
-
-    In addition, collect **observations** – any explicit facts that may affect the proposal.  
-    Each observation is a dict with `type` and `reasoning` (short justification).  
-    Example: `{{"type": "loom_required", "reasoning": "Client explicitly asks to record a Loom explaining the approach"}}`.
-
-    **Observation types (use exact strings):**
-    - `loom_required` – client explicitly says "record a Loom" or "send a short video", but does NOT require it to be attached to the proposal.
-    - `loom_mandatory_in_proposal` – client explicitly requires the video to be **attached** to the proposal (this is a red flag → SKIP).
-    - `project_based` – job is described as "project-based", "one-off", "fixed scope", or similar (duration short).
-    - `part_time` – client specifies fewer than 30 hours/week or "part‑time".
-    - `urgent_start` – client explicitly wants start immediately or within days.
-    - `nda_required` – client explicitly mentions NDA.
-    - `test_task_paid` / `test_task_unpaid` – client explicitly asks for a test task, with payment status.
-    - `screen_recorded_assessment` – client requires a screen‑recorded assessment (red flag).
-    - `geo_restriction` – client restricts location (red flag).
-    - `niche_stack` – client requires a very narrow technology that does not match profiles (red flag).
-    - `no_job_details` – job description is empty or lacks technical details (red flag).
-
-    **Important:** Do NOT add an observation unless the job description explicitly states it.  
-    If a type is not applicable, omit it.
-
-    **Red flags** are observations that cause SKIP (any of: `loom_mandatory_in_proposal`, `screen_recorded_assessment`, `geo_restriction`, `niche_stack`, `no_job_details`).  
-    If any red flag is present, decision = SKIP.
-
-    ---
-
-    ### Step 1 – Job Evaluation (PASS/SKIP) for each candidate
-
-    For **each candidate** in the provided list, evaluate independently:
     
-    1. **Budget mismatch**: If budget is extracted and candidate's min_salary > budget['max'] → SKIP.
-    
-    2. **Hours limit**: If weekly_hours > {MAX_HOURS_PER_WEEKS} → SKIP.
-    
-    3. **Red flag**: If any red flag observation exists → SKIP.
-    
-    4. **Skill mismatch**: If the candidate lacks a couple of skills required, but overall candidate's stack is relevant DO NOT skip (be less strict with that point). If the candidate specializes in a completely different field and do not have any real chances of applying → SKIP.
-    
-    5. Otherwise → PASS.
+### Step 3 – Differentiation Plan (internal, before writing any letter)
+ 
+Before generating any letter text, produce a private plan (you do not output this, it guides your writing):
+ 
+For each PASS candidate, decide:
+- **Hook angle** – pick one from: technical risk / missed revenue / slow time-to-market / scalability bottleneck / UX gap / cost inefficiency / security concern / team velocity. No two candidates may share the same angle.
+- **Bridge entry point** – choose one: start with the technology / start with the problem / start with the outcome. No two candidates may use the same entry point.
+- **Case emphasis** – for each selected case, choose one dimension to foreground: speed metric / scale metric / cost metric / quality metric / user metric / architectural decision. If two candidates share a case, they must foreground different dimensions.
+- **Closing structure** – choose one: lead with years of experience / lead with primary technology / lead with availability / lead with rate. No two candidates may use the same lead.
+- **CTA** – assign a different CTA phrase to each candidate from: "Let's talk." / "Open to a quick call?" / "I'd love to discuss how I can help." / "When works for you?"
+ 
+This plan enforces that every structural decision differs across candidates before a single word is written.
+ 
+---
+ 
+### Step 4 – Cover Letter Generation (per candidate, PASS only)
+ 
+Apply the differentiation plan from Step 3. Then:
+ 
+- Use `selected_hook` as the hook block.
+- Weave 3-5 required skills into case descriptions or closing — only skills present in the candidate's `skills` list or explicitly stated in the selected case content.
+- Follow the letter structure from the rules section exactly.
+- Use `\\n` for line breaks inside JSON strings.
+ 
+**Observation → letter rules (check each, apply all that match):**
+- `loom_required` → add exactly: "I'll record a Loom as requested." Somewhere in the letter body. Do not describe Loom content anywhere.
+- `urgent_start` → closing must contain "available to start immediately" or "can start within [X] days".
+- `nda_required` → closing must mention willingness to sign NDA.
+- `test_task_unpaid` → screening answers must state test tasks are completed on a paid basis only.
+ 
+**Uniqueness enforcement — after drafting all letters, verify:**
+1. No hook shares its opening word or angle with another candidate's hook.
+2. No bridge sentence starts the same way as another candidate's bridge.
+3. No case description sentence is shared verbatim between candidates.
+4. No closing leads with the same element as another candidate's closing.
+5. No two candidates share the same CTA phrase.
+If any check fails, rewrite the offending field before outputting.
+ 
+**Hard prohibition:** Do not write any skill, technology, tool, or metric that does not appear in the candidate's `skills` list or in the verbatim content of a selected case.
+ 
+**Case text format inside `letter_parts`:**
+[Case name] - [link only if a valid external client URL; omit if internal or app store]
+[What was built and the stack used, one sentence.] [Key result with a specific number or percentage, one sentence.]
+ 
+---
+ 
+### Output format (strict JSON)
+ 
+Return a single JSON object. Keys = candidate names exactly as given. Values = objects with:
+ 
+- `job_evaluation`: `{{"decision": "PASS"|"SKIP", "reasoning": "<string>", "observations": [{{"type": "<string>", "reasoning": "<string>"}}]}}`
+- `selected_cases`: array of `{{"case_id": "<string>", "name": "<string>", "link": "<string>", "reasoning": "<string>"}}`. Empty array if SKIP.
+- `hook_options`: array of 3 `{{"text": "<string>", "specificity_score": <number 1-10>}}`. Empty array if SKIP.
+- `selected_hook`: string. Empty string if SKIP.
+- `letter_parts`: `{{"hook": "", "bridge": "", "case1_text": "", "case2_text": "", "closing": "", "cta": "", "signature": ""}}`. Empty object if SKIP.
+- `screening_answers`: string. Empty string if SKIP.
+ 
+All field values must be primitive strings or arrays of objects whose fields are primitive strings or numbers. No nested objects inside string fields.
+ 
+SKIP candidates: include only `job_evaluation`. Set all other fields to their empty defaults.
+ 
+Do not copy example values. Generate from the actual job description and candidate data.
+ 
 
-    After evaluation, collect **all observations** (including skill mismatches) into `observations`.  
-    The `reasoning` must explicitly state why the candidate passed or failed.
-    
-    ---
+Example of `letter_parts` (inside a candidate object):
 
-    ### Step 2 – Candidate‑specific generation
+```json
+"letter_parts": {{
+  "hook": "You are not considering the significant technical risk...",
+  "bridge": "I build full stack platforms using React for complex admin UIs, Python for backend services...",
+  "case1_text": "Arcade - https://arcade.ai\\nDeveloped an AI-powered marketplace with real-time recommendation engine using Python, FastAPI, and PostgreSQL. Reduced page load time by 40%.",
+  "case2_text": "Classful - https://classful.com\\nEdTech SaaS serving 1M+ MAU. Rewrote backend from monolith to microservices with Node.js, Docker, and Kubernetes. Cut server costs by 30%.",
+  "closing": "15+ years full-stack, 5+ years cloud/DevOps. React, Node.js, Python, Docker, AWS CDK. Available 40 hrs/week, rate $50/hr. I can start immediately.",
+  "cta": "Let's talk.",
+  "signature": "Best, Tilek\\nhttps://github.com/tilekchubakov"
+}}
+```
 
-    For **each candidate** in the provided profiles list (JSON below), generate a JSON object with the following fields:
+Example for two candidates:
 
-    - `job_evaluation` (object with `decision`, `reasoning`, `observations`)
-    - `selected_cases` (array of exactly 2 case objects, each with `case_id`, `name`, `link`, `reasoning`)
-    - `hook_options` (array of 3 hook objects, each with `text` and `specificity_score`)
-    - `selected_hook` (string, the best hook)
-    - `cover_letter` (string, the generated letter)
-    - `screening_answers` (string, answers to questions or empty)
-
-    Do **not** include a `selected_profile` field – the profile is already identified by the outer key.
-
-    **Important:**  
-    - For each candidate, use their own `min_salary_per_hour_usd` and `portfolio_link` (if provided).  
-    - Cases must be selected independently for each candidate.  
-    - You may reuse cases across candidates; no need to forbid duplicates unless instructed otherwise.
-    - **Skills validation:** When generating the letter and screening answers, you may only mention a required skill (from the job description) if that skill is explicitly present in the candidate's `skills` list or is clearly demonstrated by at least one of the selected cases. Do not claim the candidate has experience in a skill that is not supported by their profile or cases. In particular, do not mention "HIPAA" unless the candidate's profile or a case explicitly contains evidence of HIPAA work (e.g., BAA, PHI handling, compliance).
-    - **Candidate‑centric case selection:** When selecting cases for a candidate, prefer cases that are listed in the candidate's `priority_cases` (if provided) and that match the candidate's own skills and past projects. Do not assign a case to a candidate if the candidate had no role in that case (e.g., a case from another candidate's portfolio). Use only cases that belong to the candidate's own experience. If the candidate has no relevant cases, you may leave `selected_cases` empty and the decision will be SKIP.
-
-    ---
-    
-    ### Step 3 – Cover Letter Generation
-
-    - Use `selected_hook` as Block 1.
-    - Weave 3‑5 required skills into case descriptions or closing.
-    - Strictly follow structure and formatting rules.
-    - Use `\n` for line breaks inside JSON strings.
-    - **If observation `loom_required` exists**: add the phrase "I'll record a Loom as requested." in the letter (no details). Do not describe Loom content in letter or screening answers.
-    - **If observation `nda_required` exists**: mention in closing that you are willing to sign.
-    - **If observation `test_task_unpaid` exists**: in screening answers state that test tasks are completed on a paid basis only.
-
-    **Personalization and uniqueness (CRITICAL):**
-    - Every field in `letter_parts` (hook, bridge, case1_text, case2_text, closing, cta) MUST be unique per candidate. Even if two candidates share 90% of their tech stack, the generated text must differ substantially in phrasing, sentence structure, angles, and chosen details.
-    - **Hook variation:** Rotate the opening angle across candidates (do not use the same pattern). Possible angles: technical risk, missed revenue, slow time-to-market, scalability bottleneck, user experience gap, cost inefficiency, security concern, team velocity. Phrase each hook differently, avoiding templates like "You are not considering...".
-    - **Bridge variation:** Always connect the candidate’s exact stack to a specific pain point from the job description. Use different sentence structures: start with the technology, start with the problem, or start with the outcome. Never reuse the same bridging phrase for different candidates.
-    - **Case uniqueness:** If two candidates worked on similar projects (e.g., both built an AI marketplace), select different aspects to highlight: one case focuses on latency reduction, the other on recommendation accuracy; one mentions concrete metrics like "40% load time drop", the other mentions "handled 10k concurrent users". Use different project names/URLs as given in the candidate's data. If a candidate has multiple projects, pick a diverse pair that showcases different skills.
-    - **Closing uniqueness:** Vary the order of skills, emphasize different top skills, and rephrase availability details. Instead of a rigid "X years full-stack, Y years cloud. Tech stack A, B, C. Rate $Z", change the flow: "I bring 8 years of production experience, most recently focused on cloud-native architectures with AWS and Kubernetes. I'm available 40 hrs/week at $60/hr, ready to start in 3 days."
-    - **CTA uniqueness:** Rotate through different natural calls-to-action: "Let's talk.", "Open to a quick call?", "I'd love to discuss how I can help.", "When works for you?" – but adjust to match the letter's tone.
-    - **Signature:** Always use the candidate’s provided name and link(s). This part is inherently tied to the individual, but ensure it is populated from the input data and not hardcoded.
-    - **No copy-paste patterns:** Avoid repeating any full phrase, transitional sentence, or list structure from other candidates. Treat each generation as completely independent. If you notice similar stacks, consciously rewrite every sentence.
-    - **Job description terms:** Weave in precise terminology from the job description (exact technology names, business pain points, industry jargon). Do not use generic phrases like "I have experience with AI/ML" – instead say "I deployed a RAG pipeline with LangChain and Pinecone handling 10k requests/day."
-    - **No hallucinated skills:** Never write a sentence like "I have experience with X" unless X is present in the candidate's `skills` list or is explicitly described in one of the selected cases. If a required skill from the job is missing from the candidate, simply omit it from the letter – do not invent it.
-    
-    **Case description format (one‑shot example):**
-    Arcade - Developed an AI-powered marketplace with real-time recommendation engine using Python, FastAPI, and PostgreSQL. Reduced page load time by 40% and increased user engagement by 25%.
-    
-    - Start with the case name, then a space, then the link **only if it's a valid external client website** (not internal Interexy pages, not app stores). If no valid link, write only the case name.
-    - After the name (and optional link), write a **newline** (`\n`), then the description.
-    - The description must include: what was built, specific technologies used, and a key result with a metric (%, numbers).
-    
-    ### Output format (strict JSON)
-
-    Return a **single JSON object** where **keys are candidate names** (exactly as they appear in the profiles list) and **values are objects** with the following fields:
-    - `job_evaluation` (object with `decision`, `reasoning`, `observations`)
-    - `selected_cases` (array of exactly 2 case objects, each with `case_id`, `name`, `link`, `reasoning`)
-    - `hook_options` (array of 3 hook objects, each with `text` and `specificity_score`)
-    - `selected_hook` (string, the best hook)
-    - **`letter_parts`** (object with fields: `hook`, `bridge`, `case1_text`, `case2_text`, `closing`, `cta`, `signature`)
-    - `screening_answers` (string, answers to questions or empty)
-    
-    **Important:** Do **not** include a field named `cover_letter`. Instead, use `letter_parts` as described.
-    
-    Example of `letter_parts` (inside a candidate object):
-
-    ```json
+```json
+{{
+  "Tilek Chubakov": {{
+    "job_evaluation": {{
+      "decision": "",
+      "reasoning": "...",
+      "observations": []
+    }},
+    "selected_cases": [
+      {{ "case_id": "...", "name": "...", "link": "...", "reasoning": "..." }},
+      {{ "case_id": "...", "name": "...", "link": "...", "reasoning": "..." }}
+    ],
+    "hook_options": [
+      {{ "text": "...", "specificity_score": 0 }},
+      {{ "text": "...", "specificity_score": 0 }},
+      {{ "text": "...", "specificity_score": 0 }}
+    ],
+    "selected_hook": "...",
     "letter_parts": {{
-      "hook": "You are not considering the significant technical risk...",
-      "bridge": "I build full stack platforms using React for complex admin UIs, Python for backend services...",
-      "case1_text": "Arcade - https://arcade.ai\\nDeveloped an AI-powered marketplace with real-time recommendation engine using Python, FastAPI, and PostgreSQL. Reduced page load time by 40%.",
-      "case2_text": "Classful - https://classful.com\\nEdTech SaaS serving 1M+ MAU. Rewrote backend from monolith to microservices with Node.js, Docker, and Kubernetes. Cut server costs by 30%.",
-      "closing": "15+ years full-stack, 5+ years cloud/DevOps. React, Node.js, Python, Docker, AWS CDK. Available 40 hrs/week, rate $50/hr. I can start immediately.",
-      "cta": "Let's talk.",
-      "signature": "Best, Tilek\\nhttps://github.com/tilekchubakov"
+      "hook": "...",
+      "bridge": "...",
+      "case1_text": "...",
+      "case2_text": "...",
+      "closing": "...",
+      "cta": "...",
+      "signature": "..."
+    }},
+    "screening_answers": "..."
+  }},
+  "Victoria": {{
+    "job_evaluation": {{
+      "decision": "",
+      "reasoning": "...",
+      "observations": []
     }}
+  }},
+  "Vicode Solutions": {{
+    "job_evaluation": {{
+      "decision": "",
+      "reasoning": "...",
+      "observations": []
+    }},
+    "selected_cases": [
+      {{ "case_id": "...", "name": "...", "link": "...", "reasoning": "..." }},
+      {{ "case_id": "...", "name": "...", "link": "...", "reasoning": "..." }}
+    ],
+    "hook_options": [
+      {{ "text": "...", "specificity_score": 0 }},
+      {{ "text": "...", "specificity_score": 0 }},
+      {{ "text": "...", "specificity_score": 0 }}
+    ],
+    "selected_hook": "...",
+    "letter_parts": {{
+      "hook": "...",
+      "bridge": "...",
+      "case1_text": "...",
+      "case2_text": "...",
+      "closing": "...",
+      "cta": "...",
+      "signature": "..."
+    }},
+    "screening_answers": "..."
+  }}
+}}
     ```
     
-    Example for two candidates:
-
-    ```json
-    {{
-      "Tilek Chubakov": {{
-        "job_evaluation": {{
-          "decision": "",
-          "reasoning": "...",
-          "observations": []
-        }},
-        "selected_cases": [
-          {{ "case_id": "...", "name": "...", "link": "...", "reasoning": "..." }},
-          {{ "case_id": "...", "name": "...", "link": "...", "reasoning": "..." }}
-        ],
-        "hook_options": [
-          {{ "text": "...", "specificity_score": 0 }},
-          {{ "text": "...", "specificity_score": 0 }},
-          {{ "text": "...", "specificity_score": 0 }}
-        ],
-        "selected_hook": "...",
-        "letter_parts": {{
-          "hook": "...",
-          "bridge": "...",
-          "case1_text": "...",
-          "case2_text": "...",
-          "closing": "...",
-          "cta": "...",
-          "signature": "..."
-        }},
-        "screening_answers": "..."
-      }},
-      "Victoria": {{
-        "job_evaluation": {{
-          "decision": "",
-          "reasoning": "...",
-          "observations": []
-        }}
-      }},
-      "Vicode Solutions": {{
-        "job_evaluation": {{
-          "decision": "",
-          "reasoning": "...",
-          "observations": []
-        }},
-        "selected_cases": [
-          {{ "case_id": "...", "name": "...", "link": "...", "reasoning": "..." }},
-          {{ "case_id": "...", "name": "...", "link": "...", "reasoning": "..." }}
-        ],
-        "hook_options": [
-          {{ "text": "...", "specificity_score": 0 }},
-          {{ "text": "...", "specificity_score": 0 }},
-          {{ "text": "...", "specificity_score": 0 }}
-        ],
-        "selected_hook": "...",
-        "letter_parts": {{
-          "hook": "...",
-          "bridge": "...",
-          "case1_text": "...",
-          "case2_text": "...",
-          "closing": "...",
-          "cta": "...",
-          "signature": "..."
-        }},
-        "screening_answers": "..."
-      }}
-    }}
-    ```
-    
-    If a candidate's decision is SKIP, you may omit all fields except job_evaluation (or include empty/placeholder values – but including only job_evaluation is acceptable).
-    Always include observations array (empty if none).
-    Each screening answer must start on a new line with number, dot, space.
-    Do not copy example values; generate actual data from the job analysis.
-    
-    ### Candidate profiles
-    {json.dumps(profiles_to_use, indent=2, ensure_ascii=False)}
+### Candidate profiles
+{json.dumps(
+    [{{k: v for k, v in p.items() if k != "priority_cases"}} for p in profiles_to_use],
+    indent=2, ensure_ascii=False
+)}
 """
 
-    cases_text = ""
-    for idx, case in enumerate(best_cases_with_content, 1):
-        cases_text += f"\n=== КЕЙС {idx} ===\nID: {case.get('id')}\nНазвание: {case.get('name', 'Unknown')}\nСсылка: {case.get('link', 'N/A')}\nСодержание:\n{case.get('content', '')[:3000]}\n"
+    cases_text = build_cases_text(best_cases_with_content, profiles_to_use)
 
     prompt = f"""
 Ты – AI-ассистент по подбору персонала для IT-вакансий. Твоя задача – оценить вакансию, выбрать наиболее подходящего кандидата из списка профилей и сгенерировать готовое письмо-отклик и ответы на скрининг-вопросы (если есть).
@@ -701,7 +994,9 @@ async def generate_initial_response(
 """
     system_message = {"role": "system", "content": "Ты – экспертный помощник по подбору персонала для IT-компаний. Отвечай только JSON."}
     messages = [system_message, {"role": "user", "content": prompt}]
-
+    logger.info("=== RESULT FROM process_job ===")
+    logger.info(json.dumps(prompt, indent=2, ensure_ascii=False))
+    logger.info("=== END RESULT ===")
     try:
         response = await client_local.chat.completions.create(
             model="gpt-4o",
@@ -709,55 +1004,56 @@ async def generate_initial_response(
             temperature=0.3,
             response_format={"type": "json_object"}
         )
-        result = json.loads(response.choices[0].message.content)
+        raw = response.choices[0].message.content
+        result = json.loads(raw)
 
-        # Постобработка для нового формата (letter_parts)
-        if isinstance(result, dict):
-            for name, data in result.items():
-                if not isinstance(data, dict):
-                    continue
-                # Обработка letter_parts
-                if 'letter_parts' in data and isinstance(data['letter_parts'], dict):
-                    for part in ['hook', 'bridge', 'case1_text', 'case2_text', 'closing', 'cta', 'signature']:
-                        if part in data['letter_parts'] and isinstance(data['letter_parts'][part], str):
-                            data['letter_parts'][part] = fix_newlines(data['letter_parts'][part])
-                # Обработка остальных текстовых полей
-                if 'screening_answers' in data and isinstance(data['screening_answers'], str):
-                    data['screening_answers'] = fix_newlines(data['screening_answers'])
-                if 'selected_hook' in data and isinstance(data['selected_hook'], str):
-                    data['selected_hook'] = fix_newlines(data['selected_hook'])
-                if 'hook_options' in data and isinstance(data['hook_options'], list):
-                    for opt in data['hook_options']:
-                        if 'text' in opt and isinstance(opt['text'], str):
-                            opt['text'] = fix_newlines(opt['text'])
-                # Гарантия наличия обязательных полей
-                data.setdefault('job_evaluation',
-                                {"decision": "SKIP", "reasoning": "Missing evaluation", "observations": []})
-                data.setdefault('selected_cases', [])
-                data.setdefault('hook_options', [])
-                data.setdefault('selected_hook', "")
-                data.setdefault('letter_parts', {})
-                data.setdefault('screening_answers', "")
-        else:
-            raise ValueError(f"Expected dict, got {type(result)}")
+        if not isinstance(result, dict):
+            raise TypeError(
+                f"Top-level response must be an object, got {type(result).__name__}"
+            )
+
+        # Validate every profile block — raises TypeError on first bad field
+        for profile_name, profile_data in result.items():
+            _validate_profile_data(profile_name, profile_data)
+
+        # All types are correct — apply fix_newlines only (no coercion)
+        for name, data in result.items():
+            lp = data.get("letter_parts", {})
+            for part in ("hook", "bridge", "case1_text", "case2_text", "closing", "cta", "signature"):
+                if lp.get(part):
+                    lp[part] = fix_newlines(lp[part])
+            if data.get("screening_answers"):
+                data["screening_answers"] = fix_newlines(data["screening_answers"])
+            if data.get("selected_hook"):
+                data["selected_hook"] = fix_newlines(data["selected_hook"])
+            for opt in data.get("hook_options", []):
+                if opt.get("text"):
+                    opt["text"] = fix_newlines(opt["text"])
+
+            data.setdefault("job_evaluation",
+                            {"decision": "SKIP", "reasoning": "Missing evaluation", "observations": []})
+            data.setdefault("selected_cases", [])
+            data.setdefault("hook_options", [])
+            data.setdefault("selected_hook", "")
+            data.setdefault("letter_parts", {})
+            data.setdefault("screening_answers", "")
+
         return result
+
+    except (json.JSONDecodeError, TypeError, ValueError) as e:
+        msg = str(e)
+        print(f"Initial generation type/format error: {msg}")
+        return {"error": msg}
     except Exception as e:
         print(f"Initial generation error: {e}")
-        return {p["name"]: {
-            "job_evaluation": {"decision": "SKIP", "reasoning": f"Error: {e}", "observations": []},
-            "selected_cases": [],
-            "hook_options": [],
-            "selected_hook": "",
-            "letter_parts": {},
-            "screening_answers": ""
-        } for p in profiles_to_use}
+        return {"error": str(e)}
 
 
 async def generate_edit_response(
-    edit_request: str,
-    previous_response: dict,
-    conversation_history: list,
-    api_key: str
+        edit_request: str,
+        previous_response: dict,
+        conversation_history: list,
+        api_key: str
 ) -> dict:
     client_local = AsyncOpenAI(api_key=api_key)
     system_message = {
@@ -783,31 +1079,68 @@ async def generate_edit_response(
             temperature=0.3,
             response_format={"type": "json_object"}
         )
-        result = json.loads(response.choices[0].message.content)
-        # Постобработка для letter_parts
-        if 'letter_parts' in result and isinstance(result['letter_parts'], dict):
-            for part in ['hook', 'bridge', 'case1_text', 'case2_text', 'closing', 'cta', 'signature']:
-                if part in result['letter_parts'] and isinstance(result['letter_parts'][part], str):
-                    result['letter_parts'][part] = fix_newlines(result['letter_parts'][part])
-        if 'screening_answers' in result and isinstance(result['screening_answers'], str):
-            result['screening_answers'] = fix_newlines(result['screening_answers'])
-        if 'selected_hook' in result and isinstance(result['selected_hook'], str):
-            result['selected_hook'] = fix_newlines(result['selected_hook'])
-        if 'hook_options' in result and isinstance(result['hook_options'], list):
-            for opt in result['hook_options']:
-                if 'text' in opt and isinstance(opt['text'], str):
-                    opt['text'] = fix_newlines(opt['text'])
+        raw = response.choices[0].message.content
+        result = json.loads(raw)
+
+        if not isinstance(result, dict):
+            raise TypeError(
+                f"Top-level response must be an object, got {type(result).__name__}"
+            )
+
+        # Detect shape and validate
+        first_val = next(iter(result.values()), None)
+        if isinstance(first_val, dict) and "letter_parts" in first_val:
+            # Multi-profile shape
+            for profile_name, profile_data in result.items():
+                _validate_profile_data(profile_name, profile_data)
+            for name, data in result.items():
+                lp = data.get("letter_parts", {})
+                for part in ("hook", "bridge", "case1_text", "case2_text", "closing", "cta", "signature"):
+                    if lp.get(part):
+                        lp[part] = fix_newlines(lp[part])
+                if data.get("screening_answers"):
+                    data["screening_answers"] = fix_newlines(data["screening_answers"])
+                if data.get("selected_hook"):
+                    data["selected_hook"] = fix_newlines(data["selected_hook"])
+                for opt in data.get("hook_options", []):
+                    if opt.get("text"):
+                        opt["text"] = fix_newlines(opt["text"])
+        else:
+            # Single-profile / flat shape
+            _validate_profile_data("(edit response)", result)
+            lp = result.get("letter_parts", {})
+            for part in ("hook", "bridge", "case1_text", "case2_text", "closing", "cta", "signature"):
+                if lp.get(part):
+                    lp[part] = fix_newlines(lp[part])
+            if result.get("screening_answers"):
+                result["screening_answers"] = fix_newlines(result["screening_answers"])
+            if result.get("selected_hook"):
+                result["selected_hook"] = fix_newlines(result["selected_hook"])
+            for opt in result.get("hook_options", []):
+                if opt.get("text"):
+                    opt["text"] = fix_newlines(opt["text"])
+
         return result
+
+    except (json.JSONDecodeError, TypeError, ValueError) as e:
+        msg = str(e)
+        print(f"Edit generation type/format error: {msg}")
+        return {"error": msg}
     except Exception as e:
         print(f"Edit generation error: {e}")
-        return previous_response
+        return {"error": str(e)}
 
 
-
-
-def append_to_google_sheet(job_description: str, profile_name: str, cover_letter: str, screening_answers: str = ""):
+def append_to_google_sheet(
+        job_description: str,
+        profile_name: str,
+        cover_letter: str,
+        screening_answers: str = "",
+) -> Optional[int]:
     """
-    Записывает данные в Google Sheets таблицу.
+    Appends a new row to the Google Sheet and returns the 1-based row number
+    that was written (needed so we can update it later).  Returns None if
+    Sheets is not configured or the write fails.
     """
     try:
         creds_json = os.getenv("GOOGLE_SHEETS_CREDENTIALS_JSON")
@@ -816,6 +1149,56 @@ def append_to_google_sheet(job_description: str, profile_name: str, cover_letter
 
         if not creds_json or not spreadsheet_id:
             print("⚠️ Google Sheets credentials not configured, skipping logging")
+            return None
+
+        creds_dict = json.loads(creds_json)
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        client_gspread = gspread.authorize(creds)
+
+        sheet = client_gspread.open_by_key(spreadsheet_id).worksheet(worksheet_name)
+        now = datetime.now().isoformat()
+
+        # Truncate oversized fields
+        job_preview = job_description[:5000] + ("..." if len(job_description) > 5000 else "")
+        letter_preview = cover_letter[:5000] + ("..." if len(cover_letter) > 5000 else "")
+        screening_preview = screening_answers[:5000] + ("..." if len(screening_answers) > 5000 else "")
+
+        row = [now, job_preview, profile_name, letter_preview, screening_preview]
+        sheet.append_row(row)
+
+        # gspread doesn't return the written row index directly, so we ask for
+        # the current number of rows after the append.
+        row_number = len(sheet.get_all_values())
+        print(f"✅ Записано в Google Sheets: {profile_name} - PASS (row {row_number})")
+        return row_number
+
+    except Exception as e:
+        import traceback
+        print(f"❌ Ошибка записи в Google Sheets: {e}")
+        traceback.print_exc()
+        return None
+
+
+def update_google_sheet_row(
+        row_number: int,
+        job_description: str,
+        profile_name: str,
+        cover_letter: str,
+        screening_answers: str = "",
+) -> None:
+    """
+    Overwrites an existing row (identified by its 1-based *row_number*) in the
+    Google Sheet.  The timestamp in column A is refreshed to the current time
+    so it's clear when the record was last edited.
+    """
+    try:
+        creds_json = os.getenv("GOOGLE_SHEETS_CREDENTIALS_JSON")
+        spreadsheet_id = os.getenv("GOOGLE_SHEETS_SPREADSHEET_ID")
+        worksheet_name = os.getenv("GOOGLE_SHEETS_WORKSHEET_NAME", "Sheet1")
+
+        if not creds_json or not spreadsheet_id:
+            print("⚠️ Google Sheets credentials not configured, skipping update")
             return
 
         creds_dict = json.loads(creds_json)
@@ -826,19 +1209,20 @@ def append_to_google_sheet(job_description: str, profile_name: str, cover_letter
         sheet = client_gspread.open_by_key(spreadsheet_id).worksheet(worksheet_name)
         now = datetime.now().isoformat()
 
-        # Ограничиваем длину полей
-        job_preview = job_description[:5000] + "..." if len(job_description) > 5000 else job_description
-        letter_preview = cover_letter[:5000] + "..." if len(cover_letter) > 5000 else cover_letter
-        screening_preview = screening_answers[:5000] + "..." if len(screening_answers) > 5000 else screening_answers
+        # Truncate oversized fields (same limits as append)
+        job_preview = job_description[:5000] + ("..." if len(job_description) > 5000 else "")
+        letter_preview = cover_letter[:5000] + ("..." if len(cover_letter) > 5000 else "")
+        screening_preview = screening_answers[:5000] + ("..." if len(screening_answers) > 5000 else "")
 
-        row = [now, job_preview, profile_name, letter_preview, screening_preview]
-        sheet.append_row(row)
-        print(f"✅ Записано в Google Sheets: {profile_name} - PASS")
+        # update() accepts A1 notation; we write columns A–E of the target row.
+        cell_range = f"A{row_number}:E{row_number}"
+        sheet.update(cell_range, [[now, job_preview, profile_name, letter_preview, screening_preview]])
+        print(f"✅ Обновлено в Google Sheets: {profile_name} - row {row_number}")
+
     except Exception as e:
         import traceback
-        print(f"❌ Ошибка записи в Google Sheets: {e}")
+        print(f"❌ Ошибка обновления Google Sheets row {row_number}: {e}")
         traceback.print_exc()
-
 
 # ----------------------------------------------------------------------
 # Пайплайн обработки (без GUI)

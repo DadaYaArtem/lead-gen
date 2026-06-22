@@ -6,7 +6,7 @@ import { Dashboard } from "@/components/Dashboard";
 import { CasesPage } from "@/components/CasesPage";
 import { CoverLetterGenerator } from "@/components/CoverLetterGenerator";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "http://localhost:8000";
 const API = `${BACKEND_URL}/api`;
 
 function App() {
@@ -19,7 +19,7 @@ function App() {
   const [selectedAccountId, setSelectedAccountId] = useState(null);
   const [leadsFromDb, setLeadsFromDb] = useState([]);
   const [queueStats, setQueueStats] = useState(null);
-  const [currentPage, setCurrentPage] = useState("dashboard"); // "dashboard" | "cases" | "cover-letter"
+  const [currentPage, setCurrentPage] = useState("dashboard");
   const pollingRef = useRef(null);
 
   // Fetch accounts on mount
@@ -46,12 +46,10 @@ function App() {
     }
   }, [selectedAccountId]);
 
-  // Fetch leads from DB when account changes
   useEffect(() => {
     fetchLeads();
   }, [fetchLeads]);
 
-  // Fetch queue stats periodically
   useEffect(() => {
     const fetchStats = async () => {
       try {
@@ -61,7 +59,7 @@ function App() {
         console.error("Failed to fetch queue stats:", e);
       }
     };
-    
+
     fetchStats();
     const interval = setInterval(fetchStats, 5000);
     return () => clearInterval(interval);
@@ -150,8 +148,6 @@ function App() {
     return () => stopPolling();
   }, [stopPolling]);
 
-  const isCasesPage = currentPage === "cases";
-
   return (
     <div className={currentPage === "cases" || currentPage === "cover-letter"
       ? "h-screen flex flex-col overflow-hidden bg-[#f8fafc]"
@@ -159,21 +155,35 @@ function App() {
     }>
       <div className="shrink-0">
         <Dashboard
-          // все пропсы как раньше
+          isRunning={isRunning}
+          status={status}
+          results={results}
+          leadsFromDb={leadsFromDb}
+          queueStats={queueStats}
+          error={error}
+          onRunAnalysis={runAnalysis}
+          onRetryLeads={retryLeads}
+          jobId={jobId}
+          accounts={accounts}
+          selectedAccountId={selectedAccountId}
+          onAccountChange={setSelectedAccountId}
+          onLeadsChange={fetchLeads}
           currentPage={currentPage}
           onNavigate={setCurrentPage}
         />
       </div>
-      {currentPage === "cases" && (
-        <div className="flex-1 overflow-hidden">
-          <CasesPage />
-        </div>
-      )}
-      {currentPage === "cover-letter" && (
-        <div className="flex-1 overflow-hidden">
-          <CoverLetterGenerator />
-        </div>
-      )}
+      <div
+        className="flex-1 overflow-hidden"
+        style={{ display: currentPage === "cases" ? "flex" : "none" }}
+      >
+        <CasesPage />
+      </div>
+      <div
+        className="flex-1 overflow-hidden w-full"
+        style={{ display: currentPage === "cover-letter" ? "flex" : "none" }}
+      >
+        <CoverLetterGenerator />
+      </div>
     </div>
   );
 }
