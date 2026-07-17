@@ -1,0 +1,93 @@
+{
+  "name": "Lead Gen Stats 05 - Daily Metrics Rollup",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Final reporting table\n\nRefreshes `leadgen_stats.daily_metrics` for the previous 45 days. Recalculating a rolling window lets late HeyReach status updates correct previous dates.\n\nRead the report from:\n`select * from leadgen_stats.v_daily_metrics;`",
+        "width": 500,
+        "height": 260,
+        "color": 5
+      },
+      "id": "705dad3b-41d5-4f92-923e-8cfb5720b4c2",
+      "name": "Output",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-620, -280]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "cronExpression", "expression": "0 3 * * *"}]
+        }
+      },
+      "id": "fa2a29a8-ed6c-4ac6-aeae-b907d7e748ed",
+      "name": "Daily 03:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-500, 20]
+    },
+    {
+      "parameters": {},
+      "id": "ff7aa29a-d755-472c-be61-2886ae4d9f86",
+      "name": "Manual Backfill Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [-500, 150]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select leadgen_stats.refresh_daily_metrics(current_date - 45, current_date);",
+        "options": {}
+      },
+      "id": "d286c5b6-df09-4c4e-bc13-8c2f74f9a483",
+      "name": "Refresh Daily Metrics",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [-180, 80],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CREDENTIAL_ID",
+          "name": "Lead Gen Stats Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select * from leadgen_stats.v_daily_metrics where metric_date >= current_date - 7 order by metric_date desc, account_name;",
+        "options": {}
+      },
+      "id": "27963477-ff70-4265-a10a-854ede4959cf",
+      "name": "Read Latest Metrics",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [100, 80],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CREDENTIAL_ID",
+          "name": "Lead Gen Stats Postgres"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Daily 03:00": {"main": [[{"node": "Refresh Daily Metrics", "type": "main", "index": 0}]]},
+    "Manual Backfill Trigger": {"main": [[{"node": "Refresh Daily Metrics", "type": "main", "index": 0}]]},
+    "Refresh Daily Metrics": {"main": [[{"node": "Read Latest Metrics", "type": "main", "index": 0}]]}
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Amsterdam",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "versionId": "9a4040d0-8462-4778-9ea8-a43fbdbd8784",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "description": "Builds final daily campaign/manual connection and message metrics for every tracked sender account."
+  },
+  "tags": []
+}
