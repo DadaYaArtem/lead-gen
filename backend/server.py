@@ -14,9 +14,9 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
 from json_repair import repair_json
+from cover_letter_generator import process_job, append_to_google_sheet, update_google_sheet_row, user_profiles
 
 ROOT_DIR = Path(__file__).parent
-# Ensure backend/ is on sys.path so local modules resolve regardless of working directory
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
@@ -30,14 +30,13 @@ from rag import retrieve_cases, get_cases_metadata
 
 HEYREACH_API_KEY = os.environ.get('HEYREACH_API_KEY')
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
-PROXY_URL = os.environ.get('PROXY_URL')  # set to http://proxy.server:3128 on PythonAnywhere
+PROXY_URL = os.environ.get('PROXY_URL')
 
 _accounts_raw = os.environ.get('LINKEDIN_ACCOUNTS', '[]')
 LINKEDIN_ACCOUNTS = json.loads(_accounts_raw)
 
 
 def _make_client(timeout: int = 30) -> httpx.AsyncClient:
-    """Create httpx client, using proxy only if PROXY_URL env var is set."""
     if PROXY_URL:
         return httpx.AsyncClient(
             transport=httpx.AsyncHTTPTransport(proxy=PROXY_URL),
@@ -48,35 +47,175 @@ def _make_client(timeout: int = 30) -> httpx.AsyncClient:
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
 
-# In-memory job store
 jobs: Dict[str, Dict[str, Any]] = {}
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)],
+    force=True,
+)
 logger = logging.getLogger(__name__)
 
 
-# Initialize database on startup
+# ---------------------------------------------------------------------------
+# Session persistence helpers (SQLite)
+# ---------------------------------------------------------------------------
+
+import sqlite3
+
+SESSIONS_DB_PATH = ROOT_DIR / "sessions.db"
+
+def _get_sessions_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(str(SESSIONS_DB_PATH), check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def _init_sessions_db():
+    with _get_sessions_conn() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_sessions (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT 'New session',
+                messages TEXT NOT NULL DEFAULT '[]',
+                saved_state TEXT,
+                last_job_description TEXT,
+                timestamp INTEGER NOT NULL,
+                active INTEGER NOT NULL DEFAULT 0,
+                pass_count INTEGER NOT NULL DEFAULT 0,
+                saved INTEGER NOT NULL DEFAULT 0,
+                is_generating INTEGER NOT NULL DEFAULT 0,
+                profile_rows TEXT NOT NULL DEFAULT '{}'
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions(user_id)")
+        # Migrate existing databases
+        try:
+            conn.execute("ALTER TABLE user_sessions ADD COLUMN profile_rows TEXT NOT NULL DEFAULT '{}'")
+        except Exception:
+            pass  # column already exists
+        # Drop legacy sheet_row column if present (SQLite ignores unknown columns on SELECT *)
+        conn.commit()
+
+def _session_row_to_dict(row: sqlite3.Row) -> dict:
+    d = dict(row)
+    d['messages'] = json.loads(d['messages'] or '[]')
+    d['saved_state'] = json.loads(d['saved_state']) if d['saved_state'] else None
+    d['active'] = bool(d['active'])
+    d['saved'] = bool(d['saved'])
+    d['is_generating'] = bool(d['is_generating'])
+    d['profile_rows'] = json.loads(d.get('profile_rows') or '{}')
+    return d
+
+def _db_get_user_sessions(user_id: str) -> List[dict]:
+    with _get_sessions_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM user_sessions WHERE user_id = ? ORDER BY timestamp DESC",
+            (user_id,)
+        ).fetchall()
+    return [_session_row_to_dict(r) for r in rows]
+
+def _db_get_session(user_id: str, session_id: str) -> Optional[dict]:
+    with _get_sessions_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM user_sessions WHERE id = ? AND user_id = ?",
+            (session_id, user_id)
+        ).fetchone()
+    return _session_row_to_dict(row) if row else None
+
+def _db_create_session(user_id: str, session_id: str, title: str, timestamp: int) -> dict:
+    with _get_sessions_conn() as conn:
+        conn.execute(
+            """INSERT INTO user_sessions (id, user_id, title, messages, saved_state,
+               last_job_description, timestamp, active, pass_count, saved, is_generating, profile_rows)
+               VALUES (?, ?, ?, '[]', NULL, NULL, ?, 0, 0, 0, 0, '{}')""",
+            (session_id, user_id, title, timestamp)
+        )
+        conn.commit()
+    return _db_get_session(user_id, session_id)
+
+def _db_update_session(session_id: str, **kwargs):
+    if not kwargs:
+        return
+    set_clauses = []
+    values = []
+    for k, v in kwargs.items():
+        set_clauses.append(f"{k} = ?")
+        if k in ('messages', 'saved_state', 'profile_rows') and not isinstance(v, str):
+            values.append(json.dumps(v))
+        elif isinstance(v, bool):
+            values.append(int(v))
+        else:
+            values.append(v)
+    values.append(session_id)
+    with _get_sessions_conn() as conn:
+        conn.execute(
+            f"UPDATE user_sessions SET {', '.join(set_clauses)} WHERE id = ?",
+            values
+        )
+        conn.commit()
+
+def _db_delete_session(user_id: str, session_id: str) -> bool:
+    with _get_sessions_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM user_sessions WHERE id = ? AND user_id = ?",
+            (session_id, user_id)
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+def _db_count_user_sessions(user_id: str) -> int:
+    with _get_sessions_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM user_sessions WHERE user_id = ?",
+            (user_id,)
+        ).fetchone()
+    return row[0]
+
+def _db_delete_oldest_session(user_id: str):
+    with _get_sessions_conn() as conn:
+        row = conn.execute(
+            "SELECT id FROM user_sessions WHERE user_id = ? ORDER BY timestamp ASC LIMIT 1",
+            (user_id,)
+        ).fetchone()
+        if row:
+            conn.execute("DELETE FROM user_sessions WHERE id = ?", (row[0],))
+            conn.commit()
+
+def _trim_history(history: List[dict]) -> List[dict]:
+    MAX_HISTORY_CHARS = 150000
+    total = sum(len(msg.get("content", "")) for msg in history)
+    if total <= MAX_HISTORY_CHARS:
+        return history
+    new_history = []
+    current = 0
+    for msg in reversed(history):
+        current += len(msg.get("content", ""))
+        if current > MAX_HISTORY_CHARS:
+            break
+        new_history.append(msg)
+    return list(reversed(new_history))
+
+
+# ---------------------------------------------------------------------------
+
 @app.on_event("startup")
 async def startup_event():
     init_db()
+    _init_sessions_db()
     logger.info("Database initialized")
-    
-    # Start background queue processor
     from queue_processor import start_queue_processor
     start_queue_processor()
     logger.info("Background queue processor started")
 
 
-# ==================== HEYREACH API ====================
-
 async def fetch_unread_conversations(account_id: int) -> list:
-    """Fetch ALL unread conversations from HeyReach API, paginating if needed."""
     url = "https://api.heyreach.io/api/public/inbox/GetConversationsV2"
     headers = {"X-API-KEY": HEYREACH_API_KEY, "Content-Type": "application/json"}
     limit = 50
     all_items = []
     offset = 0
-
     async with _make_client(timeout=30) as client:
         while True:
             payload = {
@@ -90,20 +229,13 @@ async def fetch_unread_conversations(account_id: int) -> list:
             data = response.json()
             items = data.get('items', [])
             all_items.extend(items)
-            # If we got fewer than the limit, we've fetched everything
             if len(items) < limit:
                 break
             offset += limit
-
     return all_items
 
 
-
-
-# ==================== OPENAI HELPERS ====================
-
 def extract_openai_text(data: dict) -> str:
-    """Extract output text from OpenAI Responses API response"""
     output_array = data.get('output', [])
     for item in output_array:
         if item.get('type') == 'message':
@@ -114,7 +246,6 @@ def extract_openai_text(data: dict) -> str:
 
 
 def parse_json_from_text(text: str) -> dict:
-    """Parse JSON from OpenAI response text, handling markdown wrappers and malformed JSON"""
     text = text.replace('```json', '').replace('```', '').strip()
     json_start = text.find('{')
     json_end = text.rfind('}') + 1
@@ -130,7 +261,6 @@ def parse_json_from_text(text: str) -> dict:
 
 
 async def call_openai(prompt: str, use_web_search: bool = False, timeout_sec: int = 180) -> dict:
-    """Call OpenAI Responses API"""
     url = "https://api.openai.com/v1/responses"
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
     payload = {
@@ -138,7 +268,6 @@ async def call_openai(prompt: str, use_web_search: bool = False, timeout_sec: in
         "tools": [{"type": "web_search"}] if use_web_search else [],
         "input": prompt
     }
-
     async with _make_client(timeout=timeout_sec) as client:
         response = await client.post(url, headers=headers, json=payload)
         if response.status_code != 200:
@@ -151,20 +280,6 @@ async def call_openai(prompt: str, use_web_search: bool = False, timeout_sec: in
 
 
 async def call_openai_chat(system_prompt: str, messages: list, timeout_sec: int = 90) -> str:
-    """Call OpenAI Responses API for the per-lead chat with web search enabled.
-
-    Uses the same Responses API as the analysis pipeline so that web_search is
-    available. The system prompt is passed as a 'developer' role message at
-    position 0 of the input array, followed by the full conversation history.
-
-    Args:
-        system_prompt: System message providing lead context.
-        messages: List of {role, content} dicts representing the conversation so far.
-        timeout_sec: Request timeout in seconds (longer than plain chat due to web search).
-
-    Returns:
-        The assistant reply as a plain string.
-    """
     url = "https://api.openai.com/v1/responses"
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
     payload = {
@@ -175,7 +290,6 @@ async def call_openai_chat(system_prompt: str, messages: list, timeout_sec: int 
             *[{"role": m["role"], "content": m["content"]} for m in messages],
         ],
     }
-
     async with _make_client(timeout=timeout_sec) as client:
         response = await client.post(url, headers=headers, json=payload)
         if response.status_code != 200:
@@ -187,59 +301,37 @@ async def call_openai_chat(system_prompt: str, messages: list, timeout_sec: int 
         return reply
 
 
-
-# ==================== BACKGROUND PIPELINE ====================
-
 async def run_analysis_pipeline(job_id: str, account_id: int):
-    """Main analysis pipeline running in background"""
     from database import save_lead, save_classification, save_analysis, save_messages
-    
     job = jobs[job_id]
     try:
-        # Step 1: Fetch conversations
         job['step'] = 'fetching'
         job['status_text'] = 'Fetching unread conversations from HeyReach...'
         logger.info(f"[{job_id}] Fetching conversations for account {account_id}")
-
         conversations = await fetch_unread_conversations(account_id)
         job['total_conversations'] = len(conversations)
         job['status_text'] = f'Found {len(conversations)} unread conversations. Classifying intent...'
-
         if not conversations:
             job['step'] = 'done'
             job['status_text'] = 'No unread conversations found'
             job['completed'] = True
             return
-
-        # Step 2: Classify conversations by intent
         job['step'] = 'classifying'
         logger.info(f"[{job_id}] Classifying {len(conversations)} conversations")
-
         classifications = await classify_conversations(conversations)
-
-        # Build index → classification map
-        intent_map = {c['index']: c for c in classifications}
-
-        # Collect conversations that were classified (have CORRESPONDENT in last 5)
         classified_convs = [(conversations[c['index']], c) for c in classifications if c['index'] < len(conversations)]
-
         job['total_leads'] = len(classified_convs)
         job['leads_info'] = []
-
         if not classified_convs:
             job['step'] = 'done'
             job['status_text'] = 'No conversations with recent replies found'
             job['completed'] = True
             return
-
         intent_counts = {}
         for _, cls in classified_convs:
             intent_counts[cls['intent']] = intent_counts.get(cls['intent'], 0) + 1
         counts_str = ', '.join(f"{k}: {v}" for k, v in intent_counts.items())
-
         job['status_text'] = f'Classified {len(classified_convs)} conversations ({counts_str}). Starting analysis...'
-
-        # Populate lead info with intent
         for conv, cls in classified_convs:
             profile = conv.get('correspondentProfile', {})
             job['leads_info'].append({
@@ -255,63 +347,43 @@ async def run_analysis_pipeline(job_id: str, account_id: int):
                 'step': 'waiting',
                 'conversation': conv
             })
-
         job['step'] = 'analyzing'
-
-        # Step 3: Process each lead sequentially
         for idx, (conv, cls) in enumerate(classified_convs):
             lead_info = job['leads_info'][idx]
             lead_name = lead_info['name']
             lead_company = lead_info['company']
             intent = lead_info['intent']
-
             try:
                 lead_info['status'] = 'processing'
                 lead_info['step'] = 'analyzing'
                 job['processed'] = idx
                 job['status_text'] = f'Analyzing {lead_name} [{intent}] ({idx + 1}/{len(classified_convs)})...'
                 logger.info(f"[{job_id}] Analyzing lead {idx + 1}: {lead_name} (intent={intent})")
-
-                # Save lead to DB
                 profile = conv.get('correspondentProfile', {})
-                # Use conversationId from HeyReach, or generate from profile URL + account_id for stability
                 conversation_id = conv.get('conversationId')
                 if not conversation_id:
-                    # Fallback: use profile URL + account_id as stable identifier
                     profile_url = profile.get('profileUrl', '')
                     if profile_url:
                         unique_str = f"{profile_url}:{account_id}"
                         conversation_id = hashlib.sha256(unique_str.encode()).hexdigest()[:16]
                     else:
                         conversation_id = str(uuid.uuid4())
-                
-                # Check if lead already exists (for logging)
                 from database import get_lead_by_conversation_id
                 existing_lead = get_lead_by_conversation_id(conversation_id)
                 if existing_lead:
                     logger.info(f"[{job_id}] Updating existing lead: {lead_name} (conversation_id={conversation_id})")
                 else:
                     logger.info(f"[{job_id}] Creating new lead: {lead_name} (conversation_id={conversation_id})")
-                
                 linkedin_messages = conv.get('messages', [])
                 lead_id = save_lead(conversation_id, account_id, profile, linkedin_messages)
-
-                # Save classification
                 save_classification(lead_id, intent, cls['confidence'], cls.get('reasoning', ''))
-
-                # Deep analysis
                 analysis_prompt = create_analysis_prompt(conv)
                 analysis = await call_openai(analysis_prompt, use_web_search=True, timeout_sec=180)
                 lead_info['analysis'] = analysis
-
-                # Save analysis to DB
                 save_analysis(lead_id, analysis)
-
-                # Select message prompt by intent
                 lead_info['step'] = 'generating_messages'
                 job['status_text'] = f'Generating messages for {lead_name} ({idx + 1}/{len(classified_convs)})...'
                 logger.info(f"[{job_id}] Generating messages for {lead_name}")
-
                 if intent == 'soft_objection':
                     msg_prompt = create_no_thanks_messages_prompt(
                         analysis, lead_name, lead_company, lead_info.get('position', '')
@@ -320,35 +392,26 @@ async def run_analysis_pipeline(job_id: str, account_id: int):
                     msg_prompt = create_catchup_messages_prompt(
                         analysis, lead_name, lead_company, lead_info.get('position', ''), intent
                     )
-
                 messages_data = await call_openai(msg_prompt, use_web_search=False, timeout_sec=120)
                 lead_info['messages_data'] = messages_data
-
-                # Save messages to DB
                 save_messages(lead_id, messages_data)
-
                 lead_info['status'] = 'done'
                 lead_info['step'] = 'done'
                 logger.info(f"[{job_id}] Lead {lead_name} done")
-
             except Exception as e:
                 logger.error(f"[{job_id}] Lead {lead_name} failed: {e}")
                 lead_info['status'] = 'failed'
                 lead_info['step'] = 'failed'
                 lead_info['error'] = str(e)
-
-            # Rate limiting pause between leads
             if idx < len(classified_convs) - 1:
                 job['status_text'] = f'Completed {lead_name}. Pausing before next lead...'
                 await asyncio.sleep(5)
-
         job['processed'] = len(classified_convs)
         job['step'] = 'done'
         job['completed'] = True
         done_count = sum(1 for l in job['leads_info'] if l['status'] == 'done')
         failed_count = sum(1 for l in job['leads_info'] if l['status'] == 'failed')
         job['status_text'] = f'Analysis complete! {done_count} successful, {failed_count} failed out of {len(classified_convs)} leads.'
-
     except Exception as e:
         logger.error(f"[{job_id}] Pipeline error: {e}")
         job['step'] = 'error'
@@ -357,41 +420,30 @@ async def run_analysis_pipeline(job_id: str, account_id: int):
         job['completed'] = True
 
 
-# ==================== RETRY PIPELINE ====================
-
 async def retry_leads_pipeline(job_id: str, lead_names: List[str]):
-    """Re-run analysis for specific failed leads"""
     from database import save_analysis, save_messages
-    
     job = jobs[job_id]
     try:
         leads_to_retry = [li for li in job['leads_info'] if li['name'] in lead_names]
-
         for idx, lead_info in enumerate(leads_to_retry):
             lead_name = lead_info['name']
             lead_company = lead_info['company']
             conv = lead_info.get('conversation', {})
-
             try:
                 lead_info['status'] = 'processing'
                 lead_info['step'] = 'analyzing'
                 job['status_text'] = f'Retrying {lead_name} ({idx + 1}/{len(leads_to_retry)})...'
                 logger.info(f"[{job_id}] Retrying lead: {lead_name}")
-
                 analysis_prompt = create_analysis_prompt(conv)
                 analysis = await call_openai(analysis_prompt, use_web_search=True, timeout_sec=180)
                 lead_info['analysis'] = analysis
-
-                # Save analysis to DB
                 profile = conv.get('correspondentProfile', {})
                 conversation_id = conv.get('conversationId', str(uuid.uuid4()))
                 lead_id_result = get_lead_by_conversation_id(conversation_id)
                 if lead_id_result:
                     save_analysis(lead_id_result['id'], analysis)
-
                 lead_info['step'] = 'generating_messages'
                 job['status_text'] = f'Generating messages for {lead_name} ({idx + 1}/{len(leads_to_retry)})...'
-
                 intent = lead_info.get('intent', 'catchup_thanks')
                 if intent == 'soft_objection':
                     msg_prompt = create_no_thanks_messages_prompt(
@@ -404,31 +456,24 @@ async def retry_leads_pipeline(job_id: str, lead_names: List[str]):
                 messages_data = await call_openai(msg_prompt, use_web_search=False, timeout_sec=120)
                 lead_info['messages_data'] = messages_data
                 lead_info['error'] = None
-
-                # Save messages to DB
                 if lead_id_result:
                     save_messages(lead_id_result['id'], messages_data)
-
                 lead_info['status'] = 'done'
                 lead_info['step'] = 'done'
                 logger.info(f"[{job_id}] Retry done: {lead_name}")
-
             except Exception as e:
                 logger.error(f"[{job_id}] Retry failed for {lead_name}: {e}")
                 lead_info['status'] = 'failed'
                 lead_info['step'] = 'failed'
                 lead_info['error'] = str(e)
-
             if idx < len(leads_to_retry) - 1:
                 await asyncio.sleep(5)
-
         done_count = sum(1 for l in job['leads_info'] if l['status'] == 'done')
         failed_count = sum(1 for l in job['leads_info'] if l['status'] == 'failed')
         job['processed'] = len(job['leads_info'])
         job['step'] = 'done'
         job['completed'] = True
         job['status_text'] = f'Retry complete! {done_count} successful, {failed_count} failed.'
-
     except Exception as e:
         logger.error(f"[{job_id}] Retry pipeline error: {e}")
         job['step'] = 'error'
@@ -437,8 +482,6 @@ async def retry_leads_pipeline(job_id: str, lead_names: List[str]):
         job['completed'] = True
 
 
-# ==================== API ENDPOINTS ====================
-
 @api_router.get("/")
 async def root():
     return {"message": "Interexy Lead Analyzer API"}
@@ -446,29 +489,19 @@ async def root():
 
 @api_router.get("/accounts")
 async def get_accounts():
-    """Return available LinkedIn accounts"""
     return {"accounts": LINKEDIN_ACCOUNTS}
-
-
 
 
 @api_router.post("/webhook/heyreach")
 async def heyreach_webhook(request: Request):
-    """
-    Webhook endpoint for HeyReach events.
-    Handles EVERY_MESSAGE_REPLY_RECEIVED events.
-    """
     try:
         body = await request.json()
         logger.info(f"Received webhook: {json.dumps(body)[:500]}")
-        
         success = await process_webhook_event(body)
-        
         if success:
             return {"status": "queued", "message": "Conversation queued for analysis"}
         else:
             return {"status": "skipped", "message": "Event skipped or already processed"}
-            
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid JSON")
     except Exception as e:
@@ -478,7 +511,6 @@ async def heyreach_webhook(request: Request):
 
 @api_router.get("/leads/{account_id}")
 async def get_leads(account_id: int):
-    """Get all analyzed leads for a specific account"""
     try:
         leads = get_all_leads_for_account(account_id)
         return {"leads": leads}
@@ -489,41 +521,31 @@ async def get_leads(account_id: int):
 
 @api_router.get("/queue/stats")
 async def get_stats():
-    """Get processing queue statistics"""
     stats = get_queue_stats()
     return {"stats": stats}
 
 
 @api_router.get("/leads")
 async def get_all_leads():
-    """Get all leads from all accounts (for debugging)"""
     import sqlite3
     from database import get_db_connection
-
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT DISTINCT account_id FROM leads")
         account_ids = [row[0] for row in cursor.fetchall()]
-
     all_leads = []
     for acc_id in account_ids:
         leads = get_all_leads_for_account(acc_id)
         all_leads.extend(leads)
-
     return {"leads": all_leads, "total": len(all_leads)}
 
 
 @api_router.delete("/leads/{conversation_id}")
 async def delete_lead(conversation_id: str):
-    """
-    Delete a lead and all associated data (classifications, analyses, messages).
-    """
     try:
         from database import delete_lead as db_delete_lead
-        
         logger.info(f"Attempting to delete lead: {conversation_id}")
         deleted = db_delete_lead(conversation_id)
-        
         if deleted:
             logger.info(f"Successfully deleted lead: {conversation_id}")
             return {"status": "success", "message": f"Lead {conversation_id} deleted"}
@@ -543,29 +565,18 @@ class CleanupRequest(BaseModel):
 
 @api_router.post("/cleanup/preview")
 async def cleanup_preview(request: CleanupRequest):
-    """
-    Dry-run: shows what cleanup would delete without actually deleting.
-    Also returns raw HeyReach unseen data so we can verify field names.
-    """
     from database import get_all_leads_for_account
-
     account_id = request.account_id
-
     try:
         unseen = await fetch_unread_conversations(account_id)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"HeyReach API error: {str(e)}")
-
-    # Show first item's keys so we know what fields HeyReach returns
     sample_keys = list(unseen[0].keys()) if unseen else []
     sample_id_fields = {k: unseen[0].get(k) for k in ('id', 'conversationId', 'conversation_id') if unseen and unseen[0].get(k)} if unseen else {}
-
     unseen_ids = {conv.get('id') or conv.get('conversationId') for conv in unseen}
     unseen_ids.discard(None)
-
     db_leads = get_all_leads_for_account(account_id)
     would_delete = [l.get('conversation_id') for l in db_leads if l.get('conversation_id') and l.get('conversation_id') not in unseen_ids]
-
     return {
         "unseen_count": len(unseen),
         "unseen_ids_sample": list(unseen_ids)[:5],
@@ -579,35 +590,23 @@ async def cleanup_preview(request: CleanupRequest):
 
 @api_router.post("/cleanup")
 async def cleanup_handled_leads(request: CleanupRequest):
-    """
-    Delete leads from DB that are no longer unseen in HeyReach.
-    Matches by profileUrl since HeyReach webhook and API use different ID formats.
-    """
     from database import get_all_leads_for_account, delete_lead as db_delete_lead
-
     account_id = request.account_id
-
     try:
         unseen = await fetch_unread_conversations(account_id)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"HeyReach API error: {str(e)}")
-
-    # Build set of profileUrls that are still unseen
     unseen_profile_urls = {
         conv.get('correspondentProfile', {}).get('profileUrl')
         for conv in unseen
     }
     unseen_profile_urls.discard(None)
-
     db_leads = get_all_leads_for_account(account_id)
-
     if not db_leads:
         return {"deleted": 0, "message": "No leads in database"}
-
     if not unseen_profile_urls:
         logger.warning(f"Cleanup aborted: HeyReach returned 0 unseen for account {account_id}")
         return {"deleted": 0, "aborted": True, "reason": "HeyReach returned no unseen conversations — refusing to delete all leads"}
-
     deleted = []
     for lead in db_leads:
         cid = lead.get('conversation_id')
@@ -619,7 +618,6 @@ async def cleanup_handled_leads(request: CleanupRequest):
                 logger.info(f"Cleanup: deleted handled lead {cid} ({profile_url})")
             except Exception as e:
                 logger.error(f"Cleanup: error deleting lead {cid}: {e}")
-
     logger.info(f"Cleanup for account {account_id}: deleted {len(deleted)} handled leads")
     return {"deleted": len(deleted), "conversation_ids": deleted}
 
@@ -630,7 +628,6 @@ class RunAnalysisRequest(BaseModel):
 
 @api_router.get("/knowledge-base")
 async def get_knowledge_base():
-    """List all case studies in the knowledge base (metadata only, no embeddings)."""
     try:
         cases = get_cases_metadata()
         return {
@@ -645,10 +642,8 @@ async def get_knowledge_base():
 
 @api_router.post("/run-analysis")
 async def run_analysis(request: RunAnalysisRequest):
-    """Start the analysis pipeline"""
     if not HEYREACH_API_KEY or not OPENAI_API_KEY:
         raise HTTPException(status_code=500, detail="Missing API keys configuration")
-
     job_id = str(uuid.uuid4())
     jobs[job_id] = {
         'job_id': job_id,
@@ -663,7 +658,6 @@ async def run_analysis(request: RunAnalysisRequest):
         'account_id': request.account_id,
         'created_at': datetime.now(timezone.utc).isoformat()
     }
-
     asyncio.create_task(run_analysis_pipeline(job_id, request.account_id))
     return {"job_id": job_id, "message": "Analysis started"}
 
@@ -675,34 +669,28 @@ class RetryLeadsRequest(BaseModel):
 
 @api_router.post("/retry-leads")
 async def retry_leads(request: RetryLeadsRequest):
-    """Retry analysis for specific failed leads"""
     job = jobs.get(request.job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     if not job.get('completed'):
         raise HTTPException(status_code=400, detail="Job is still running")
-
     for lead_info in job['leads_info']:
         if lead_info['name'] in request.lead_names:
             lead_info['status'] = 'pending'
             lead_info['step'] = 'waiting'
             lead_info['error'] = None
-
     job['completed'] = False
     job['step'] = 'retrying'
     job['status_text'] = f'Retrying {len(request.lead_names)} lead(s)...'
     job['error'] = None
-
     asyncio.create_task(retry_leads_pipeline(request.job_id, request.lead_names))
     return {"message": f"Retry started for {len(request.lead_names)} lead(s)"}
 
 
 @api_router.get("/status/{job_id}")
 async def get_status(job_id: str):
-    """Get job status"""
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found")
-
     job = jobs[job_id]
     leads_summary = []
     for lead in job.get('leads_info', []):
@@ -716,7 +704,6 @@ async def get_status(job_id: str):
             'step': lead.get('step', 'waiting'),
             'error': lead.get('error')
         })
-
     return {
         'job_id': job_id,
         'step': job['step'],
@@ -732,17 +719,14 @@ async def get_status(job_id: str):
 
 @api_router.get("/results/{job_id}")
 async def get_results(job_id: str):
-    """Get full results"""
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found")
-
     job = jobs[job_id]
     results = []
     for lead in job.get('leads_info', []):
         analysis = lead.get('analysis', {})
         messages_data = lead.get('messages_data', {})
         qualification = analysis.get('qualification', {})
-
         results.append({
             'name': lead.get('name', ''),
             'company': lead.get('company', ''),
@@ -762,7 +746,6 @@ async def get_results(job_id: str):
             'recommended_top_3': messages_data.get('recommended_top_3', []),
             'strategy_notes': messages_data.get('notes', '')
         })
-
     return {
         'job_id': job_id,
         'completed': job['completed'],
@@ -772,31 +755,21 @@ async def get_results(job_id: str):
 
 
 class ChatMessageItem(BaseModel):
-    role: str  # "user" or "assistant"
+    role: str
     content: str
 
 
 class ChatRequest(BaseModel):
-    conversation_id: str          # DB identifier — always available (DB or in-memory)
-    lead_name: str                 # used as fallback label if DB has no name yet
+    conversation_id: str
+    lead_name: str
     messages: List[ChatMessageItem]
-    job_id: Optional[str] = None  # kept for backward compatibility only
+    job_id: Optional[str] = None
 
 
 @api_router.post("/chat")
 async def chat_with_lead(request: ChatRequest):
-    """Chat with GPT-5.1 (+ web search) about a specific lead.
-
-    Lookup order:
-    1. SQLite DB by conversation_id (works after page reload or webhook-triggered analysis)
-    2. In-memory job store by job_id + lead_name (fallback for leads from current session
-       that haven't been persisted yet)
-    """
     from database import get_lead_by_conversation_id as db_get_lead
-
     lead_context = None
-
-    # --- Primary: DB lookup ---
     db_lead = db_get_lead(request.conversation_id)
     if db_lead:
         analysis = db_lead.get('analysis', {})
@@ -815,8 +788,6 @@ async def chat_with_lead(request: ChatRequest):
             'recommended_top_3': generated.get('recommended_top_3', []),
             'strategy_notes': generated.get('notes', ''),
         }
-
-    # --- Fallback: in-memory job store ---
     if lead_context is None and request.job_id:
         job = jobs.get(request.job_id)
         if job:
@@ -840,14 +811,11 @@ async def chat_with_lead(request: ChatRequest):
                     'recommended_top_3': [],
                     'strategy_notes': '',
                 }
-
     if lead_context is None:
         raise HTTPException(
             status_code=404,
             detail=f"Lead '{request.lead_name}' not found in DB or active job"
         )
-
-    # RAG: retrieve relevant case studies based on the user's last message
     retrieved_cases = []
     if OPENAI_API_KEY and request.messages:
         last_user_msg = next(
@@ -863,16 +831,13 @@ async def chat_with_lead(request: ChatRequest):
                     )
             except Exception as e:
                 logger.warning(f"RAG retrieval failed (non-fatal): {e}")
-
     system_prompt = create_chat_system_prompt(lead_context, retrieved_cases=retrieved_cases or None)
     messages = [{"role": m.role, "content": m.content} for m in request.messages]
-
     try:
         reply = await call_openai_chat(system_prompt, messages, timeout_sec=90)
     except Exception as e:
         logger.error(f"Chat error for lead {request.lead_name}: {e}")
         raise HTTPException(status_code=500, detail=f"OpenAI request failed: {str(e)}")
-
     return {"reply": reply, "retrieved_cases": [{"id": c["id"], "title": c["title"], "score": c["score"]} for c in retrieved_cases]}
 
 
@@ -882,11 +847,6 @@ class CaseChatRequest(BaseModel):
 
 @api_router.post("/case-chat")
 async def chat_with_cases(request: CaseChatRequest):
-    """Chat with GPT-5.1 (+ web search) about Interexy's case portfolio.
-
-    No lead context is required — this is a standalone case assistant.
-    RAG retrieval is performed on the user's last message to find relevant cases.
-    """
     retrieved_cases = []
     if OPENAI_API_KEY and request.messages:
         last_user_msg = next(
@@ -902,16 +862,13 @@ async def chat_with_cases(request: CaseChatRequest):
                     )
             except Exception as e:
                 logger.warning(f"Case RAG retrieval failed (non-fatal): {e}")
-
     system_prompt = create_case_chat_system_prompt(retrieved_cases=retrieved_cases or None)
     messages = [{"role": m.role, "content": m.content} for m in request.messages]
-
     try:
         reply = await call_openai_chat(system_prompt, messages, timeout_sec=90)
     except Exception as e:
         logger.error(f"Case chat error: {e}")
         raise HTTPException(status_code=500, detail=f"OpenAI request failed: {str(e)}")
-
     return {
         "reply": reply,
         "retrieved_cases": [
@@ -919,6 +876,289 @@ async def chat_with_cases(request: CaseChatRequest):
             for c in retrieved_cases
         ],
     }
+
+
+MAX_SESSIONS_PER_USER = 20
+
+
+class CreateSessionRequest(BaseModel):
+    user_id: str
+    title: Optional[str] = "New session"
+
+
+class GenerateCoverLetterRequest(BaseModel):
+    job_description: str
+    user_id: str
+    session_id: Optional[str] = None
+
+
+class ResetSessionRequest(BaseModel):
+    user_id: str
+
+
+class SaveCoverLetterRequest(BaseModel):
+    job_description: str
+    profile_name: str
+    cover_letter: str
+    screening_answers: str = ""
+    user_id: str
+    session_id: str
+
+
+@api_router.post("/sessions/create")
+async def create_session(request: CreateSessionRequest):
+    user_id = request.user_id
+    count = _db_count_user_sessions(user_id)
+    if count >= MAX_SESSIONS_PER_USER:
+        _db_delete_oldest_session(user_id)
+    session_id = str(uuid.uuid4())
+    timestamp = int(datetime.now(timezone.utc).timestamp() * 1000)
+    session = _db_create_session(user_id, session_id, request.title or "New session", timestamp)
+    return {"session_id": session_id, "session": {
+        **session,
+        "message_count": 0,
+    }}
+
+
+@api_router.get("/sessions/{user_id}")
+async def list_sessions(user_id: str):
+    sessions = _db_get_user_sessions(user_id)
+    result = []
+    for s in sessions:
+        result.append({
+            "id": s["id"],
+            "title": s["title"],
+            "timestamp": s["timestamp"],
+            "active": s["active"],
+            "message_count": len(s.get("messages", [])),
+            "pass_count": s["pass_count"],
+            "saved": s["saved"],
+            "is_generating": s["is_generating"],
+        })
+    return {"sessions": result}
+
+
+@api_router.get("/sessions/{user_id}/{session_id}")
+async def get_session(user_id: str, session_id: str):
+    session = _db_get_session(user_id, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _db_update_session(session_id, active=1)
+    return {
+        "session": {
+            "id": session["id"],
+            "title": session["title"],
+            "messages": session["messages"],
+            "saved_state": session["saved_state"],
+            "last_job_description": session["last_job_description"],
+            "timestamp": session["timestamp"],
+            "pass_count": session["pass_count"],
+            "saved": session["saved"],
+            "is_generating": session["is_generating"],
+        }
+    }
+
+
+@api_router.delete("/sessions/{user_id}/{session_id}")
+async def delete_session(user_id: str, session_id: str):
+    deleted = _db_delete_session(user_id, session_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"status": "deleted"}
+
+
+@api_router.get("/sessions/{user_id}/{session_id}/status")
+async def get_session_status(user_id: str, session_id: str):
+    session = _db_get_session(user_id, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    messages = session.get("messages", [])
+    return {
+        "is_generating": session["is_generating"],
+        "messages_count": len(messages),
+        "pass_count": session["pass_count"],
+        "has_result": any(m.get("result") or m.get("error") for m in messages),
+        "saved": session["saved"],
+    }
+
+
+@api_router.post("/save-cover-letter")
+async def save_cover_letter(request: SaveCoverLetterRequest):
+    session = _db_get_session(request.user_id, request.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Per-profile row map: { profile_name: sheet_row_number }
+    profile_rows: dict = session.get("profile_rows") or {}
+    existing_row = profile_rows.get(request.profile_name)
+
+    if existing_row:
+        update_google_sheet_row(
+            row_number=existing_row,
+            job_description=request.job_description,
+            profile_name=request.profile_name,
+            cover_letter=request.cover_letter,
+            screening_answers=request.screening_answers,
+        )
+        sheet_row = existing_row
+        logger.info(f"Updated Sheets row {sheet_row} for profile '{request.profile_name}' session {request.session_id}")
+    else:
+        sheet_row = append_to_google_sheet(
+            request.job_description,
+            request.profile_name,
+            request.cover_letter,
+            request.screening_answers,
+        )
+        logger.info(f"Appended Sheets row {sheet_row} for profile '{request.profile_name}' session {request.session_id}")
+
+    # Persist the updated map and mark the session as having at least one saved profile
+    profile_rows[request.profile_name] = sheet_row
+    _db_update_session(request.session_id, saved=1, profile_rows=profile_rows)
+    return {
+        "status": "saved",
+        "session_id": request.session_id,
+        "profile_name": request.profile_name,
+        "sheet_row": sheet_row,
+    }
+
+
+@api_router.post("/generate-cover-letter")
+async def generate_cover_letter(request: GenerateCoverLetterRequest):
+    user_id = request.user_id
+    session_id = request.session_id
+
+    if not session_id:
+        create_req = CreateSessionRequest(user_id=user_id, title=request.job_description[:30])
+        new_session_resp = await create_session(create_req)
+        session_id = new_session_resp["session_id"]
+
+    session = _db_get_session(user_id, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    conversation_history = session.get("messages", [])
+    saved_state = session.get("saved_state")
+
+    _db_update_session(session_id, is_generating=1)
+
+    try:
+        result, new_saved_state = await process_job(
+            job_description=request.job_description,
+            conversation_history=conversation_history,
+            saved_state=saved_state
+        )
+        logger.info("=== RESULT FROM process_job ===")
+        logger.info(json.dumps(result, indent=2, ensure_ascii=False))
+        logger.info("=== END RESULT ===")
+        if "error" in result:
+            _db_update_session(session_id, is_generating=0)
+            raise HTTPException(status_code=400, detail=result["error"])
+
+        if isinstance(result, dict) and isinstance(result.get("__error__"), str):
+            error_text = (
+                "The model returned an invalid response format, so the generated profiles "
+                "cannot be shown.\n\n"
+                f"Details: {result['__error__']}"
+            )
+
+            updated_messages = list(conversation_history)
+            updated_messages.append({"role": "user", "content": request.job_description})
+            updated_messages.append({
+                "role": "assistant",
+                "content": error_text,
+                "error": error_text,
+            })
+            updated_messages = _trim_history(updated_messages)
+
+            new_title = session["title"]
+            if new_title == "New session":
+                new_title = request.job_description[:30]
+
+            _db_update_session(
+                session_id,
+                messages=updated_messages,
+                saved_state=new_saved_state,
+                last_job_description=request.job_description,
+                timestamp=int(datetime.now(timezone.utc).timestamp() * 1000),
+                title=new_title,
+                pass_count=0,
+                is_generating=0,
+            )
+
+            return {
+                "error": error_text,
+                "session_id": session_id,
+                "invalid_model_response": True,
+            }
+
+        all_cases = new_saved_state.get("cases", []) if new_saved_state else []
+
+        updated_messages = list(conversation_history)
+        updated_messages.append({"role": "user", "content": request.job_description})
+        assistant_msg = {
+            "role": "assistant",
+            "content": "Generated cover letters",
+            "result": result,
+            "all_cases": all_cases,
+        }
+        updated_messages.append(assistant_msg)
+        updated_messages = _trim_history(updated_messages)
+
+        pass_count = sum(
+            1 for profile_data in result.values()
+            if profile_data.get("job_evaluation", {}).get("decision") == "PASS"
+        )
+
+        new_title = session["title"]
+        if new_title == "New session":
+            new_title = request.job_description[:30]
+
+        _db_update_session(
+            session_id,
+            messages=updated_messages,
+            saved_state=new_saved_state,
+            last_job_description=request.job_description,
+            timestamp=int(datetime.now(timezone.utc).timestamp() * 1000),
+            title=new_title,
+            pass_count=pass_count,
+            is_generating=0,
+        )
+
+        return {
+            "result": result,
+            "saved_state": new_saved_state,
+            "session_id": session_id,
+            "all_cases": all_cases,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        _db_update_session(session_id, is_generating=0)
+        logger.error(f"Error generating cover letter for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@api_router.post("/reset-session")
+async def reset_session(request: ResetSessionRequest):
+    sessions = _db_get_user_sessions(request.user_id)
+    for s in sessions:
+        _db_delete_session(request.user_id, s["id"])
+    return {"status": "reset", "user_id": request.user_id}
+
+
+@api_router.get("/profiles")
+async def get_profiles():
+    profiles = [
+        {
+            "name": p["name"],
+            "position": p["position"],
+            "min_salary_per_hour_usd": p.get("min_salary_per_hour_usd"),
+            "portfolio_link": p.get("portfolio_link"),
+            "priority_cases": p.get("priority_cases", [])
+        }
+        for p in user_profiles
+    ]
+    return {"profiles": profiles}
 
 
 app.include_router(api_router)
@@ -930,3 +1170,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True, log_level="info", log_config=None)

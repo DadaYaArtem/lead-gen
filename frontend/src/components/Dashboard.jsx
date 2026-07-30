@@ -27,7 +27,9 @@ import {
   Sparkles,
   BookOpen,
   LayoutDashboard,
+  FileText
 } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 const API = process.env.REACT_APP_BACKEND_URL + '/api';
 
@@ -100,41 +102,37 @@ export function Dashboard({
     }
     
     try {
-      // Get conversation_id from the lead data (passed from DB)
       const conversationId = lead.conversation_id || lead.profile_url;
-      
+
       if (!conversationId) {
         toast.error("Cannot delete lead: missing conversation ID");
         return;
       }
-      
+
       const response = await fetch(`${API}/leads/${conversationId}`, {
         method: 'DELETE',
         headers: {
           'Content-Type': 'application/json',
         },
       });
-      
+
       const data = await response.json();
-      
+
       if (response.ok) {
         toast.success(`Lead "${lead.name}" deleted`);
         onLeadsChange();
       } else {
-        // Handle HTTP errors
         const errorMsg = data?.detail || data?.message || `HTTP ${response.status}`;
         toast.error(`Failed to delete: ${errorMsg}`);
       }
     } catch (e) {
-      // Handle network errors or other exceptions
       console.error('Delete error:', e);
       toast.error(`Failed to delete: ${e.message || 'Network error'}`);
     }
   };
-  
-  // Only use DB leads - results from job is only for manual analysis progress
-  const hasDbLeads = leadsFromDb.length > 0;
-  const dbDoneCount = leadsFromDb.filter((l) => l.messages).length || 0;
+
+  const hasDbLeads = (leadsFromDb || []).length > 0;
+  const dbDoneCount = (leadsFromDb || []).filter((l) => l.messages).length || 0;
   const dbPendingCount = queueStats?.pending || 0;
   const totalLeads = status?.total_leads || 0;
   const processed = status?.processed || 0;
@@ -142,9 +140,11 @@ export function Dashboard({
   const isComplete = status?.completed;
 
   return (
-    <div className="max-w-7xl mx-auto px-6 py-8">
-      {/* Header */}
-      <header className="mb-8" data-testid="app-header">
+    <div className={cn(
+  "max-w-7xl mx-auto",
+  currentPage === "cover-letter" ? "px-0 py-0" : "px-6 py-8"
+)}>
+      <header className={cn("mb-8", currentPage === "cover-letter" && "mb-0")} data-testid="app-header">
         <div className="flex items-center justify-between">
           <div>
             <h1
@@ -182,7 +182,6 @@ export function Dashboard({
           </Badge>
         </div>
 
-        {/* Navigation tabs */}
         <div className="flex items-center gap-1 mt-6 border-b border-slate-200" data-testid="nav-tabs">
           <button
             onClick={() => onNavigate("dashboard")}
@@ -208,16 +207,26 @@ export function Dashboard({
             <BookOpen className="h-4 w-4" />
             Case Library
           </button>
+          <button
+            onClick={() => onNavigate("cover-letter")}
+            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium rounded-t-lg border-b-2 transition-colors ${
+              currentPage === "cover-letter"
+                ? "border-[#10b981] text-[#1a2744] bg-white"
+                : "border-transparent text-slate-500 hover:text-[#1a2744] hover:bg-slate-50"
+            }`}
+            data-testid="nav-tab-cover-letter"
+          >
+            <FileText className="h-4 w-4" />
+            Cover Letters
+          </button>
         </div>
       </header>
 
-      {/* Dashboard body — only shown on the "dashboard" page */}
       {currentPage === "dashboard" && (<>
 
-      {/* Action Area */}
       <section className="mb-8" data-testid="action-section">
         <div className="flex items-center gap-4">
-          {accounts.length > 0 && (
+          {(accounts || []).length > 0 && (
             <Select
               value={selectedAccountId ? String(selectedAccountId) : ""}
               onValueChange={(val) => onAccountChange(Number(val))}
@@ -283,7 +292,6 @@ export function Dashboard({
         </div>
       </section>
 
-      {/* Error */}
       {error && (
         <div
           className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg flex items-start gap-3"
@@ -297,7 +305,6 @@ export function Dashboard({
         </div>
       )}
 
-      {/* Progress Section */}
       {isRunning && status && status.step !== "done" && (
         <section className="mb-8" data-testid="progress-section">
           <div className="bg-white rounded-lg border border-slate-200 p-6 shadow-sm">
@@ -320,7 +327,6 @@ export function Dashboard({
               {status.status_text}
             </p>
 
-            {/* Per-lead status */}
             {status.leads && status.leads.length > 0 && (
               <div className="mt-4 space-y-2">
                 {status.leads.map((lead, idx) => (
@@ -342,7 +348,6 @@ export function Dashboard({
         </section>
       )}
 
-      {/* No leads found */}
       {isComplete && totalLeads === 0 && !error && (
         <div
           className="text-center py-16"
@@ -357,7 +362,6 @@ export function Dashboard({
         </div>
       )}
 
-      {/* Unread Leads from DB */}
       {hasDbLeads && !isRunning && (
         <section data-testid="results-section">
           <div className="flex items-center justify-between mb-6">
@@ -367,7 +371,7 @@ export function Dashboard({
             <div className="flex items-center gap-4">
               <div className="flex items-center gap-1.5 text-sm text-slate-500">
                 <Inbox className="h-4 w-4" />
-                <span>{leadsFromDb.length} total</span>
+                <span>{(leadsFromDb || []).length} total</span>
               </div>
               {dbDoneCount > 0 && (
                 <div className="flex items-center gap-1.5 text-sm text-emerald-600">
@@ -429,7 +433,6 @@ export function Dashboard({
         </section>
       )}
 
-      {/* Empty state when nothing has happened yet */}
       {!isRunning && !status && !results && !hasDbLeads && !error && (
         <div className="text-center py-20" data-testid="empty-state">
           <BarChart3 className="h-16 w-16 text-slate-200 mx-auto mb-6" />
